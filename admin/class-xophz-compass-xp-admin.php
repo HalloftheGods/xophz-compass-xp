@@ -279,15 +279,15 @@ class Xophz_Compass_Xp_Admin {
     return;
   }
 
-  public function xp_achievement_repeat_box_content(){
+  public static function xp_achievement_repeat_box_content(){
     require('partials/job-repeat-box.php');
   }
 
-  public function job_xp_box_content($post){
+  public static function job_xp_box_content($post){
     require('partials/job-xp-rewards-box.php');
   }
 
-  public function xp_accessory_meta_box($post){
+  public static function xp_accessory_meta_box($post){
     require('partials/xp-accessory-meta-box.php');
   }
 
@@ -556,7 +556,7 @@ class Xophz_Compass_Xp_Admin {
     Xophz_Compass::output_json($log);
   }
 
-  public function parseLogs($logs){
+  public static function parseLogs($logs){
     $parsed = [];
     
     foreach($logs as $log){

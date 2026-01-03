@@ -279,15 +279,15 @@ class Xophz_Compass_Xp_Admin {
     return;
   }
 
-  public function xp_achievement_repeat_box_content(){
+  public static function xp_achievement_repeat_box_content(){
     require('partials/job-repeat-box.php');
   }
 
-  public function job_xp_box_content($post){
+  public static function job_xp_box_content($post){
     require('partials/job-xp-rewards-box.php');
   }
 
-  public function xp_accessory_meta_box($post){
+  public static function xp_accessory_meta_box($post){
     require('partials/xp-accessory-meta-box.php');
   }
 
@@ -559,62 +559,7 @@ class Xophz_Compass_Xp_Admin {
     Xophz_Compass::output_json($log);
   }
 
-  /**
-   * undocumented function
-   *
-   * @return void
-   */
-  public function getApOverTimeByUserId($userId)
-  {
-    global $wpdb;
-    $sql ="
-      SELECT 
-        (
-          SELECT COALESCE(SUM(ap),0) 
-          FROM `{$wpdb->prefix}xp_achievements` 
-          WHERE DATE(time) > (NOW() - INTERVAL 1 DAY) 
-          and user_id = {$userId}
-        ) as day,
-          (
-          SELECT COALESCE(SUM(ap),0) 
-          FROM `{$wpdb->prefix}xp_achievements` 
-          WHERE DATE(time) > (NOW() - INTERVAL 7 DAY) 
-          and user_id = {$userId}
-        ) as week,
-        (
-          SELECT COALESCE(SUM(ap),0) 
-          FROM `{$wpdb->prefix}xp_achievements` 
-          WHERE DATE(time) > (NOW() - INTERVAL 30 DAY) 
-          and user_id = {$userId}
-        ) as month,
-        (
-          SELECT COALESCE(SUM(ap),0) 
-          FROM `{$wpdb->prefix}xp_achievements` 
-          WHERE DATE(time) > (NOW() - INTERVAL 365 DAY) 
-          and user_id = {$userId}
-        ) as year,
-        (
-          SELECT COALESCE(SUM(ap),0) 
-          FROM `{$wpdb->prefix}xp_achievements` 
-          WHERE  user_id = {$userId}
-        ) as alltime
-      FROM `{$wpdb->prefix}xp_achievements` 
-      WHERE user_id = {$userId} 
-      GROUP by user_id
-    ";
-
-    $ap = $wpdb->get_results($sql)[0];
-
-    return [
-      'day'   => (int) $ap->day,
-      'week'    => (int) $ap->week,
-      'month'   => (int) $ap->month,
-      'year'    => (int) $ap->year,
-      'alltime' => (int) $ap->alltime,
-    ];
-  }
-
-  public function parseLogs($logs){
+  public static function parseLogs($logs){
     $parsed = [];
     
     foreach($logs as $log){

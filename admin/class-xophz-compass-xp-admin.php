@@ -61,6 +61,10 @@ class Xophz_Compass_Xp_Admin {
     'wp_ajax_xp_load_log' => 'loadLog',
   ];
 
+  public $filter_hooks = [
+    'use_block_editor_for_post_type' => ['disable_gutenberg', 10, 2],
+  ];
+
   /**
   * Initialize the class and set its properties.
   *
@@ -81,6 +85,19 @@ class Xophz_Compass_Xp_Admin {
   public function preventAdminAccess()
   {
     return false;
+  }
+
+  /**
+   * Disable Gutenberg for XP post types.
+   *
+   * @since    1.0.0
+   */
+  public function disable_gutenberg($use_block_editor, $post_type){
+    $xp_types = ['xp_achievement', 'xp_ability', 'xp_accessory'];
+    if (in_array($post_type, $xp_types)) {
+        return false;
+    }
+    return $use_block_editor;
   }
   
   
@@ -195,7 +212,7 @@ class Xophz_Compass_Xp_Admin {
     add_meta_box(
       'job_xp_box',
       __( 'XP Rewards', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'job_xp_box_content'],
+      [$this,'job_xp_box_content'],
       'xp_achievement',
       'side',
       'high'
@@ -203,7 +220,7 @@ class Xophz_Compass_Xp_Admin {
     add_meta_box(
       'job_xp_repeat_box',
       __( 'Achievement Time Table', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'xp_achievement_repeat_box_content'],
+      [$this,'xp_achievement_repeat_box_content'],
       'xp_achievement',
       'side',
       'high'
@@ -212,7 +229,7 @@ class Xophz_Compass_Xp_Admin {
     add_meta_box(
       'job_xp_box',
       __( 'Unlock Mechanism', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'xp_ability_meta_box'],
+      ['Xophz_Compass_Xp_Abilities','xp_ability_meta_box'],
       'xp_ability',
       'side',
       'high'
@@ -221,7 +238,7 @@ class Xophz_Compass_Xp_Admin {
     add_meta_box(
       'job_xp_box',
       __( 'Accessory For Sell', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'xp_accessory_meta_box'],
+      [$this,'xp_accessory_meta_box'],
       'xp_accessory',
       'side',
       'high'
@@ -234,6 +251,12 @@ class Xophz_Compass_Xp_Admin {
     if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) 
     return;
 
+    if ( !isset($_POST['job_xp_box_content_nonce']) || !wp_verify_nonce( $_POST['job_xp_box_content_nonce'], 'xophz-compass-xp-job-xp' ) ) {
+      return;
+    }
+
+    $keys = [];
+
     switch($post->post_type){
       case 'xp_achievement':
         $key_ = "_xp_achievement_";
@@ -242,10 +265,6 @@ class Xophz_Compass_Xp_Admin {
           "{$key_}ap",
           "{$key_}gp",
           "{$key_}xp",
-          "{$key_}max_redo_limit",
-          "{$key_}repeat_count",
-          "{$key_}repeat_every",
-          "{$key_}repeat_on",
           "{$key_}max_redo_limit",
           "{$key_}repeat_count",
           "{$key_}repeat_every",
@@ -273,10 +292,9 @@ class Xophz_Compass_Xp_Admin {
       break;
     }
 
-    Xophz_Compass::update_post_meta($post_id, $keys, $_POST);
-
-    if ( !wp_verify_nonce( $_POST['job_xp_box_content_nonce'], 'xophz-compass-xp-job-xp' ) )
-    return;
+    if ( !empty($keys) ) {
+      Xophz_Compass::update_post_meta($post_id, $keys, $_POST);
+    }
   }
 
   public static function xp_achievement_repeat_box_content(){

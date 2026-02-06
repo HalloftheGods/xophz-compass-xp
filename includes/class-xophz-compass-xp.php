@@ -168,16 +168,47 @@ class Xophz_Compass_Xp {
     if(is_string($class))
       $class = new $class($this->plugin_name, $this->version);
 
-    if($class->action_hooks){
-      foreach($class->action_hooks as $action => $hook){
-        if(is_array($hook)){
-          foreach($hook as $method){
-            $this->loader->add_action( $action, $class, $method); 
-          }
-        }else{
-          $this->loader->add_action( $action, $class, $hook); 
+    $hook_props = [
+        'action_hooks' => 'add_action',
+        'filter_hooks' => 'add_filter'
+    ];
+
+    foreach ($hook_props as $prop => $loader_method) {
+        if (isset($class->$prop) && is_array($class->$prop)) {
+            foreach ($class->$prop as $hook_name => $hooks_data) {
+                $registrations = [];
+                
+                if (is_string($hooks_data)) {
+                    $registrations[] = [$hooks_data, 10, 1];
+                } elseif (is_array($hooks_data)) {
+                    // Check if it's a single registration with config: ['method', priority, args]
+                    if (isset($hooks_data[0]) && is_string($hooks_data[0]) && isset($hooks_data[1]) && is_int($hooks_data[1])) {
+                        $registrations[] = [
+                            $hooks_data[0], 
+                            $hooks_data[1], 
+                            isset($hooks_data[2]) ? $hooks_data[2] : 1
+                        ];
+                    } else {
+                        // Treat as a list of registrations (can be strings or [method, p, a] arrays)
+                        foreach ($hooks_data as $h) {
+                            if (is_string($h)) {
+                                $registrations[] = [$h, 10, 1];
+                            } elseif (is_array($h) && isset($h[0]) && is_string($h[0])) {
+                                $registrations[] = [
+                                    $h[0],
+                                    isset($h[1]) ? $h[1] : 10,
+                                    isset($h[2]) ? $h[2] : 1
+                                ];
+                            }
+                        }
+                    }
+                }
+
+                foreach ($registrations as $reg) {
+                    $this->loader->$loader_method($hook_name, $class, $reg[0], $reg[1], $reg[2]);
+                }
+            }
         }
-      }
     }
   }
 

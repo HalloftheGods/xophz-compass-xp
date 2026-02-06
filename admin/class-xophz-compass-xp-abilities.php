@@ -155,14 +155,14 @@ class Xophz_Compass_Xp_Abilities {
     add_meta_box(
       'achievement_xp_box',
       __( 'Unlock Mechanism', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Abilities,'xp_ability_meta_box'],
+      [$this,'xp_ability_meta_box'],
       'xp_ability',
       'side',
       'high'
     );
   }
 
-  public function xp_ability_meta_box($post){
+  public static function xp_ability_meta_box($post){
     require('partials/xp-ability-meta-box.php');
   }
 

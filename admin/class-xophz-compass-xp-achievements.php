@@ -59,7 +59,7 @@ class Xophz_Compass_Xp_Achievements {
     'rest_api_init'                      => 'register_meta_keys'
   ];
 
- public $meta_keys = [
+  public $meta_keys = [
    '_xp_achievement_' => [
       "ap",
       "gp",
@@ -68,7 +68,6 @@ class Xophz_Compass_Xp_Achievements {
       "repeat_count",
       "repeat_every",
       "repeat_on",
-      "max_redo_limit",
    ]
  ];
 
@@ -185,7 +184,7 @@ class Xophz_Compass_Xp_Achievements {
     add_meta_box(
       'xp_achievement_xp_box',
       __( 'XP Rewards', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Achievements,'xp_achievement_xp_box_content'],
+      [$this,'xp_achievement_xp_box_content'],
       $this->post_type,
       'side',
       'high'
@@ -194,7 +193,7 @@ class Xophz_Compass_Xp_Achievements {
     add_meta_box(
       'achievement_xp_repeat_box',
       __( 'Achievement Time Table', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Achievements,'xp_achievement_repeat_box_content'],
+      [$this,'xp_achievement_repeat_box_content'],
       $this->post_type,
       'side',
       'high'
@@ -203,7 +202,7 @@ class Xophz_Compass_Xp_Achievements {
     add_meta_box(
       'achievement_xp_box',
       __( 'Unlock Mechanism', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'xp_ability_meta_box'],
+      ['Xophz_Compass_Xp_Abilities','xp_ability_meta_box'],
       'xp_ability',
       'side',
       'high'
@@ -212,7 +211,7 @@ class Xophz_Compass_Xp_Achievements {
     add_meta_box(
       'achievement_xp_box',
       __( 'Accessory For Sell', 'xophz-compass-xp' ),
-      [Xophz_Compass_Xp_Admin,'xp_accessory_meta_box'],
+      ['Xophz_Compass_Xp_Admin','xp_accessory_meta_box'],
       'xp_accessory',
       'side',
       'high'
@@ -225,25 +224,19 @@ class Xophz_Compass_Xp_Achievements {
     if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) 
     return;
 
+    if ( !isset($_POST['job_xp_box_content_nonce']) || !wp_verify_nonce( $_POST['job_xp_box_content_nonce'], 'xophz-compass-xp-job-xp' ) ) {
+      return;
+    }
+
+    $keys = [];
+
     switch($post->post_type){
       case $this->post_type:
-        foreach($this->meta_keys as $key => $keys ){
-          foreach($keys as $name){
-            $keys[] = "{$key}{$name}";
+        foreach($this->meta_keys as $key_prefix => $names ){
+          foreach($names as $name){
+            $keys[] = "{$key_prefix}{$name}";
           }
         }
-        // $key_ = "_xp_achievement_";
-
-        // $keys = [
-        //   "{$key_}ap",
-        //   "{$key_}gp",
-        //   "{$key_}xp",
-        //   "{$key_}max_redo_limit",
-        //   "{$key_}repeat_count",
-        //   "{$key_}repeat_every",
-        //   "{$key_}repeat_on",
-        //   "{$key_}max_redo_limit",
-        // ];
       break;
       case 'xp_ability':
         $key_ = "_xp_ability_";
@@ -266,10 +259,9 @@ class Xophz_Compass_Xp_Achievements {
       break;
     }
 
-    Xophz_Compass::update_post_meta($post_id, $keys, $_POST);
-
-    if ( !wp_verify_nonce( $_POST['achievement_xp_box_content_nonce'], 'xophz-compass-xp-achievement-xp' ) )
-    return;
+    if ( !empty($keys) ) {
+      Xophz_Compass::update_post_meta($post_id, $keys, $_POST);
+    }
   }
 
   public function register_meta_keys(){

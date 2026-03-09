@@ -13,7 +13,7 @@
  * @package           Xophz_Compass_Xp
  *
  * @wordpress-plugin
- * Plugin Name:       Xophz XP
+ * Plugin Name:       Xophz For the XP
  * Plugin URI:        http://mycompassconsulting/xp
  * Description:       Assign tasks that reward experience points when completed. .
  * Version:           1.0.0

@@ -555,6 +555,10 @@ class Xophz_Compass_Xp_Admin {
     Xophz_Compass::output_json($user);
   }
 
+  public static function getApOverTimeByUserId($userId) {
+    return []; // TODO: Implement if needed
+  }
+
   public function loadLog(){
     global $wpdb; 
 

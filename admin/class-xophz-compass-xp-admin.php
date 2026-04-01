@@ -513,7 +513,7 @@ class Xophz_Compass_Xp_Admin {
     ]);
   }
 
-  public function getUser($userId=false, $output_json=true){
+  public static function getUser($userId=false, $output_json=true){
     if(!$userId)
       $userId = get_current_user_id();
 

@@ -140,7 +140,7 @@ class Xophz_Compass_Xp {
 
 		$plugin_i18n = new Xophz_Compass_Xp_i18n();
 
-		$this->loader->add_action( 'plugins_loaded', $plugin_i18n, 'load_plugin_textdomain' );
+		$this->loader->add_action( 'init', $plugin_i18n, 'load_plugin_textdomain', 5 );
 
 	}
 

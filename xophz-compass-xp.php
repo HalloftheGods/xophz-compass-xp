@@ -73,19 +73,19 @@ require plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-xp.php';
  * @since    1.0.0
  */
 function run_xophz_compass_xp() {
-  if( !function_exists('is_plugin_active') ) {
-    include_once( ABSPATH . 'wp-admin/includes/plugin.php' );
-  }
-  if ( !is_plugin_active( 'xophz-compass/xophz-compass.php' ) ) {
+  if ( ! class_exists( 'Xophz_Compass' ) ) {
     add_action( 'admin_init', 'shutoff_xophz_compass_xp' );
     add_action( 'admin_notices', 'admin_notice_xophz_compass_xp' );
 
     function shutoff_xophz_compass_xp() {
+      if ( ! function_exists( 'deactivate_plugins' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+      }
       deactivate_plugins( plugin_basename( __FILE__ ) );
     }
 
     function admin_notice_xophz_compass_xp() {
-      echo '<div class="updated"><p><strong>Xophz_Compass_Xp</strong> requires Compass to run. It has self <strong>deactivated</strong>.</p></div>';
+      echo '<div class="error"><h2><strong>Xophz For the XP</strong> requires Compass to run. It has self <strong>deactivated</strong>.</h2></div>';
       if ( isset( $_GET['activate'] ) )
         unset( $_GET['activate'] );
     }
@@ -93,6 +93,5 @@ function run_xophz_compass_xp() {
     $plugin = new Xophz_Compass_Xp();
     $plugin->run();
   }
-  
 }
-run_xophz_compass_xp();
+add_action( 'plugins_loaded', 'run_xophz_compass_xp' );

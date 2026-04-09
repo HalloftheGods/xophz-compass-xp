@@ -59,6 +59,7 @@ class Xophz_Compass_Xp_Admin {
     'wp_ajax_list_billboard_chips' => 'listBillboardChips',
     'wp_ajax_xp_get_user' => 'getUser',
     'wp_ajax_xp_load_log' => 'loadLog',
+    'wp_ajax_xp_sync_gp_debt' => 'syncGpDebt',
   ];
 
   public $filter_hooks = [
@@ -522,6 +523,7 @@ class Xophz_Compass_Xp_Admin {
     $xp =  get_user_meta($userId, "{$meta_}xp", true);
     $ap =  get_user_meta($userId, "{$meta_}ap", true);
     $gp =  get_user_meta($userId, "{$meta_}gp", true);
+    $debt = get_user_meta($userId, "{$meta_}debt", true);
     $level =  get_user_meta($userId, "{$meta_}level", true);
     $birthdate = get_user_meta($userId, "_xp_birthdate", true);
 
@@ -542,6 +544,7 @@ class Xophz_Compass_Xp_Admin {
       'id' => (int) $userId,
       'xp' => (int) $xp,
       'gp' => (int) $gp,
+      'debt' => (int) $debt,
       'ap' => (int) $ap,
       'apOverTime' => $apOverTime, 
       'level' => (int) $level,
@@ -579,6 +582,21 @@ class Xophz_Compass_Xp_Admin {
     $log = ['log'=> $logs ];
 
     Xophz_Compass::output_json($log);
+  }
+
+  public function syncGpDebt() {
+    $args = Xophz_Compass::get_input_json();
+    $userId = get_current_user_id();
+    
+    if (isset($args->gp)) {
+      update_user_meta($userId, "_xp_total_gp", (int)$args->gp);
+    }
+    
+    if (isset($args->debt)) {
+      update_user_meta($userId, "_xp_total_debt", (int)$args->debt);
+    }
+
+    Xophz_Compass::output_json(['success' => true]);
   }
 
   public static function parseLogs($logs){

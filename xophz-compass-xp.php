@@ -16,7 +16,7 @@
  * Category:          True North
  * Plugin Name:       Xophz For the XP
  * Plugin URI:        http://mycompassconsulting/xp
- * Description:       Reward your visitors by gamifying their actions and milestones with points, badges, and levels.
+ * Description:       Reward your visitor's loyalty by gamifying their actions and milestones with points, badges, and levels.
  * Version:           1.0.0
  * Author:            Hall of the Gods, Inc. 
  * Author URI:        http://www.midknightknerd.com/xp

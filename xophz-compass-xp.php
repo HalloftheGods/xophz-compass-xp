@@ -16,7 +16,7 @@
  * Category:          True North
  * Plugin Name:       Xophz For the XP
  * Plugin URI:        http://mycompassconsulting/xp
- * Description:       Assign tasks that reward experience points when completed. .
+ * Description:       Reward your visitors by gamifying their actions and milestones with points, badges, and levels.
  * Version:           1.0.0
  * Author:            Xoph 
  * Author URI:        http://www.midknightknerd.com/xp

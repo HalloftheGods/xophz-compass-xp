@@ -18,7 +18,7 @@
  * Plugin URI:        http://mycompassconsulting/xp
  * Description:       Reward your visitors by gamifying their actions and milestones with points, badges, and levels.
  * Version:           1.0.0
- * Author:            Xoph 
+ * Author:            Hall of the Gods, Inc. 
  * Author URI:        http://www.midknightknerd.com/xp
  * License:           GPL-2.0+
  * License URI:       http://www.gnu.org/licenses/gpl-2.0.txt

@@ -33,7 +33,7 @@ The XP System Native Views (`/routes/xp/`) aggressively utilize COMPASS atomic U
 1. Ensure **Xophz COMPASS** is installed and active.
 2. Upload `xophz-compass-xp` to `/wp-content/plugins/`.
 3. Activate through the Plugins menu.
-4. Access via the COMPASS dashboard → **XP**.
+4. Access via the My Compass dashboard → **XP**.
 
 ## Frontend Routes
 

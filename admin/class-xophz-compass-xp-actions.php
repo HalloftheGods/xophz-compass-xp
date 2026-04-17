@@ -47,13 +47,14 @@ class Xophz_Compass_Xp_Actions {
       'public'             => false, // Actions shouldn't have public URLs natively
       'publicly_queryable' => false,
       'show_ui'            => true,
-      'show_in_menu'       => 'edit.php?post_type=xp_ability', // Put under Abilities or generic XP menu
+      'show_in_menu'       => true,
       'show_in_rest'       => true,
       'query_var'          => true,
       'capability_type'    => 'post',
       'has_archive'        => false,
       'hierarchical'       => false,
       'menu_position'      => null,
+      'menu_icon'          => 'dashicons-hammer',
       'supports'           => array( 'title', 'editor', 'author', 'custom-fields' )
     );
 

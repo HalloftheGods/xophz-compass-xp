@@ -14,6 +14,8 @@ class Xophz_Compass_Xp_Actions {
 
   public $action_hooks = [
     'init' => 'register_xp_action_cpt',
+    'add_meta_boxes' => 'add_action_meta_boxes',
+    'xophz_compass_record_action' => ['record_action', 10, 3],
   ];
 
   public function __construct( $plugin_name, $version ) {
@@ -65,5 +67,60 @@ class Xophz_Compass_Xp_Actions {
      * to register their own gamification taxonomies to the xp_action CPT.
      */
     do_action( 'xophz_register_xp_taxonomies' );
+  }
+
+  /**
+   * Record a new gamification action into the system
+   * 
+   * @param string $action_name  A recognizable name or slug for the action
+   * @param int    $user_id      The ID of the user performing the action
+   * @param array  $payload      Any contextual metadata related to the action
+   */
+  public function record_action( $action_name, $user_id, $payload = [] ) {
+    $post_id = wp_insert_post([
+      'post_title'   => sanitize_text_field($action_name) . ' - ' . current_time('mysql'),
+      'post_name'    => sanitize_title($action_name . '-' . time()),
+      'post_type'    => 'xp_action',
+      'post_status'  => 'publish',
+      'post_author'  => $user_id,
+      'post_content' => wp_json_encode($payload, JSON_PRETTY_PRINT),
+    ]);
+
+    if ( !is_wp_error($post_id) ) {
+      update_post_meta( $post_id, '_action_payload', $payload );
+      update_post_meta( $post_id, '_action_name', sanitize_text_field($action_name) );
+    }
+  }
+
+  /**
+   * Add meta boxes for the xp_action CPT to view recorded data
+   */
+  public function add_action_meta_boxes() {
+    add_meta_box(
+      'xp_action_payload_box',
+      __( 'Action Payload', 'xophz-compass-xp' ),
+      [ $this, 'render_action_payload_box' ],
+      'xp_action',
+      'normal',
+      'high'
+    );
+  }
+
+  /**
+   * Render the Action Payload meta box
+   */
+  public function render_action_payload_box( $post ) {
+    $payload = get_post_meta( $post->ID, '_action_payload', true );
+    $action_name = get_post_meta( $post->ID, '_action_name', true );
+    
+    echo '<p><strong>Action Name:</strong> <code>' . esc_html($action_name ?: 'N/A') . '</code></p>';
+    echo '<p><strong>Raw Payload:</strong></p>';
+    echo '<pre style="background: #1e1e1e; color: #a6e22e; padding: 15px; border-radius: 5px; overflow-x: auto;">';
+    if ( !empty($payload) ) {
+      echo esc_html( print_r( $payload, true ) );
+    } else {
+      echo 'No payload recorded.';
+    }
+    echo '</pre>';
   }
 }

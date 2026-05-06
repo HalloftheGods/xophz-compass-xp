@@ -110,7 +110,7 @@ class Xophz_Compass_Xp_Admin {
   */
   public function addToMenu(){
     Xophz_Compass::add_submenu($this->plugin_name,[
-      'cap' => 'read',
+      'cap' => 'manage_options',
     ]);
   }
 

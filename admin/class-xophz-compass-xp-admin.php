@@ -58,7 +58,9 @@ class Xophz_Compass_Xp_Admin {
     'wp_ajax_level_up' => 'levelUp',
     'wp_ajax_list_billboard_chips' => 'listBillboardChips',
     'wp_ajax_xp_get_user' => 'getUser',
+    'wp_ajax_nopriv_xp_get_user' => 'getUser',
     'wp_ajax_xp_load_log' => 'loadLog',
+    'wp_ajax_nopriv_xp_load_log' => 'loadLog',
     'wp_ajax_xp_sync_gp_debt' => 'syncGpDebt',
   ];
 

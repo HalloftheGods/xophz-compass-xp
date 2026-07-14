@@ -16,6 +16,7 @@ class Xophz_Compass_Xp_Logs {
     'init' => 'register_xp_log_cpt',
     'add_meta_boxes' => 'add_log_meta_boxes',
     'xophz_compass_record_action' => ['record_log', 10, 3],
+    'rest_api_init' => 'register_log_rest_routes',
   ];
 
   public function __construct( $plugin_name, $version ) {
@@ -122,5 +123,45 @@ class Xophz_Compass_Xp_Logs {
       echo 'No payload recorded.';
     }
     echo '</pre>';
+  }
+
+  public function register_log_rest_routes() {
+    register_rest_route( 'xp/v1', '/logs', array(
+      'methods'  => 'GET',
+      'callback' => array( $this, 'rest_get_logs' ),
+      'permission_callback' => function() { return is_user_logged_in(); },
+    ));
+  }
+
+  public function rest_get_logs() {
+    $user_id = get_current_user_id();
+    
+    $args = [
+        'post_type'      => 'xp_log',
+        'author'         => $user_id,
+        'post_status'    => 'publish',
+        'posts_per_page' => 20,
+        'orderby'        => 'date',
+        'order'          => 'DESC'
+    ];
+    
+    $logs = get_posts($args);
+    $out = [];
+    
+    foreach ($logs as $log) {
+        $payload = get_post_meta($log->ID, '_log_payload', true);
+        $action_name = get_post_meta($log->ID, '_log_action_name', true);
+        
+        $out[] = [
+            'id'        => $log->ID,
+            'timestamp' => $log->post_date,
+            'message'   => $action_name,
+            'type'      => 'api_call',
+            'xpAdded'   => isset($payload['xp']) ? (int)$payload['xp'] : (isset($payload['xp_reward']) ? (int)$payload['xp_reward'] : 0),
+            'payload'   => $payload
+        ];
+    }
+    
+    return rest_ensure_response($out);
   }
 }

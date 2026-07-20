@@ -474,8 +474,15 @@ class Xophz_Compass_Xp_Goals {
         $point_type = $outcome['point_type'] ?? 'xp'; // 'xp', 'ap', 'gp'
         
         if ( $amount > 0 ) {
-          $current = (int) get_user_meta( $user_id, "_xp_total_{$point_type}", true );
-          update_user_meta( $user_id, "_xp_total_{$point_type}", $current + $amount );
+          if ( class_exists( 'Xophz_Compass_Xp_Players' ) ) {
+            $xp = ($point_type === 'xp') ? $amount : 0;
+            $ap = ($point_type === 'ap') ? $amount : 0;
+            $gp = ($point_type === 'gp') ? $amount : 0;
+            Xophz_Compass_Xp_Players::add_currency( $user_id, $xp, $ap, $gp );
+          } else {
+            $current = (int) get_user_meta( $user_id, "_xp_total_{$point_type}", true );
+            update_user_meta( $user_id, "_xp_total_{$point_type}", $current + $amount );
+          }
         }
       }
       else if ( $type === 'badge_unlock' ) {

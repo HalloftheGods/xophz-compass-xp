@@ -112,6 +112,7 @@ class Xophz_Compass_Xp {
     /**
     * The class responsible for defining all actions that occur in the admin area.
     */
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-registry.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-admin.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-achievements.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-abilities.php';
@@ -164,6 +165,7 @@ class Xophz_Compass_Xp {
 	}
 
   private function define_compass_hooks(){
+    $this->define_class_hooks( 'Xophz_Compass_Xp_Registry' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Achievements' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Abilities' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Accessories' );

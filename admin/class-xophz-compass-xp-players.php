@@ -104,23 +104,42 @@ class Xophz_Compass_Xp_Players {
   }
 
   /**
-   * Centralized method to add XP, AP, GP
+   * Centralized method to add XP, AP, GP and any dynamic stats
    */
-  public static function add_currency($user_id, $xp = 0, $ap = 0, $gp = 0) {
+  public static function add_currency($user_id, $xp_or_payload = 0, $ap = 0, $gp = 0) {
     if (!$user_id) return false;
+
+    // Handle legacy signature ($xp, $ap, $gp) or new payload signature (['xp' => 10, 'rp' => 5])
+    $payload = is_array($xp_or_payload) ? $xp_or_payload : [
+        'xp' => $xp_or_payload,
+        'ap' => $ap,
+        'gp' => $gp
+    ];
 
     // XP and AP are exclusive to PRO accounts
     if ( ! self::is_pro_user($user_id) ) {
-        $xp = 0;
-        $ap = 0;
+        if (isset($payload['xp'])) $payload['xp'] = 0;
+        if (isset($payload['ap'])) $payload['ap'] = 0;
     }
 
     $stats = self::get_user_stats($user_id);
     $old_level = $stats['level'];
 
-    if ($xp > 0) update_user_meta($user_id, '_xp_total_xp', $stats['total_xp'] + $xp);
-    if ($ap > 0) update_user_meta($user_id, '_xp_total_ap', $stats['total_ap'] + $ap);
-    if ($gp > 0) update_user_meta($user_id, '_xp_total_gp', $stats['total_gp'] + $gp);
+    $registered_stats = class_exists('Xophz_Compass_Xp_Registry') ? Xophz_Compass_Xp_Registry::get_registered_stats() : [];
+
+    foreach ($payload as $stat_slug => $amount) {
+        $amount = (int) $amount;
+        if ($amount === 0) continue;
+
+        // Legacy mapping for xp, ap, gp
+        if (in_array($stat_slug, ['xp', 'ap', 'gp'])) {
+            $current_val = $stats["total_{$stat_slug}"];
+            update_user_meta($user_id, "_xp_total_{$stat_slug}", $current_val + $amount);
+        } else {
+            // Only modify stat if it is registered or explicitly requested
+            self::modify_stat($user_id, $stat_slug, $amount);
+        }
+    }
 
     // Re-evaluate level
     $new_stats = self::get_user_stats($user_id);

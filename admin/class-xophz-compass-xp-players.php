@@ -50,106 +50,199 @@ class Xophz_Compass_Xp_Players {
   }
 
   /**
-   * Database / User Metadata Controller
+   * Helper to get current blog / site ID in WP Multisite context
    */
-  public static function get_user_stats($user_id) {
+  public static function get_current_site_id() {
+    return function_exists('get_current_blog_id') ? (int) get_current_blog_id() : 1;
+  }
+
+  /**
+   * Helper to get site currency name (defaults to GP)
+   */
+  public static function get_site_currency($blog_id = null) {
+    if (!$blog_id) {
+        $blog_id = self::get_current_site_id();
+    }
+    $default_currency = 'GP';
+    return apply_filters('xophz_compass_site_currency', $default_currency, $blog_id);
+  }
+
+  /**
+   * Database / User Metadata Controller (Site Isolated)
+   */
+  public static function get_user_stats($user_id, $blog_id = null) {
+    if (!$blog_id) {
+        $blog_id = self::get_current_site_id();
+    }
+
     if (!$user_id) {
         return [
-            'level' => 1, 'current_xp' => 0, 'target_xp' => self::get_required_xp_for_level(2),
-            'total_xp' => 0, 'total_ap' => 0, 'total_gp' => 0, 'title' => 'Guest Scripter',
-            'stats' => []
+            'site_id'       => $blog_id,
+            'currency_name' => self::get_site_currency($blog_id),
+            'level'         => 1,
+            'current_xp'    => 0,
+            'target_xp'     => self::get_required_xp_for_level(2),
+            'total_xp'      => 0,
+            'total_ap'      => 0,
+            'total_gp'      => 0,
+            'title'         => 'Guest Scripter',
+            'is_pro'        => false,
+            'stats'         => (object) []
         ];
     }
 
-    $total_xp = (int) get_user_meta($user_id, '_xp_total_xp', true) ?: 0;
-    $total_ap = (int) get_user_meta($user_id, '_xp_total_ap', true) ?: 0;
-    $total_gp = (int) get_user_meta($user_id, '_xp_total_gp', true) ?: 0;
+    $site_key_prefix = "_xp_s{$blog_id}_";
+
+    $raw_xp = get_user_meta($user_id, "{$site_key_prefix}total_xp", true);
+    $raw_ap = get_user_meta($user_id, "{$site_key_prefix}total_ap", true);
+    $raw_gp = get_user_meta($user_id, "{$site_key_prefix}total_gp", true);
+
+    // Fallback to legacy keys for main site (site 1) if per-site key hasn't been set yet
+    if (($raw_xp === '' || $raw_xp === false) && ($blog_id === 1 || !is_multisite())) {
+        $total_xp = (int) get_user_meta($user_id, '_xp_total_xp', true) ?: 0;
+        $total_ap = (int) get_user_meta($user_id, '_xp_total_ap', true) ?: 0;
+        $total_gp = (int) get_user_meta($user_id, '_xp_total_gp', true) ?: 0;
+    } else {
+        $total_xp = (int) $raw_xp ?: 0;
+        $total_ap = (int) $raw_ap ?: 0;
+        $total_gp = (int) $raw_gp ?: 0;
+    }
+
     $level = self::calculate_level($total_xp);
-    
-    // Ensure meta level matches calculated level
-    update_user_meta($user_id, '_xp_total_level', $level);
+    update_user_meta($user_id, "{$site_key_prefix}total_level", $level);
 
     $xp_floor = self::get_required_xp_for_level($level);
     $xp_ceil = self::get_required_xp_for_level($level + 1);
     $current_xp_in_level = $total_xp - $xp_floor;
     $target_xp_for_level = $xp_ceil - $xp_floor;
 
-    // Get agnostic stats
+    // Get site-specific agnostic stats
     $all_meta = get_user_meta($user_id);
     $agnostic_stats = [];
+    $stat_prefix = "{$site_key_prefix}stat_";
     foreach ($all_meta as $key => $values) {
-        if (strpos($key, '_xp_stat_') === 0) {
-            $stat_slug = str_replace('_xp_stat_', '', $key);
+        if (strpos($key, $stat_prefix) === 0) {
+            $stat_slug = str_replace($stat_prefix, '', $key);
             $agnostic_stats[$stat_slug] = (int) $values[0];
+        } elseif (strpos($key, '_xp_stat_') === 0 && ($blog_id === 1 || !is_multisite())) {
+            $stat_slug = str_replace('_xp_stat_', '', $key);
+            if (!isset($agnostic_stats[$stat_slug])) {
+                $agnostic_stats[$stat_slug] = (int) $values[0];
+            }
         }
     }
 
-    $titles = [
+    $default_titles = [
         1 => 'Novice Scripter', 2 => 'Script Apprentice', 3 => 'Syntax Warrior',
         4 => 'Fullstack Alchemist', 5 => 'Master Architect'
     ];
+    $titles = apply_filters('xophz_compass_site_rank_titles', $default_titles, $blog_id);
     $title = isset($titles[$level]) ? $titles[$level] : 'Gamification Deity';
 
     return [
-        'level'      => $level,
-        'current_xp' => $current_xp_in_level,
-        'target_xp'  => $target_xp_for_level,
-        'total_xp'   => $total_xp,
-        'total_ap'   => $total_ap,
-        'total_gp'   => $total_gp,
-        'title'      => $title,
-        'is_pro'     => self::is_pro_user($user_id),
-        'stats'      => (object) $agnostic_stats, // Use object for JSON parsing
+        'site_id'       => $blog_id,
+        'currency_name' => self::get_site_currency($blog_id),
+        'level'         => $level,
+        'current_xp'    => $current_xp_in_level,
+        'target_xp'     => $target_xp_for_level,
+        'total_xp'      => $total_xp,
+        'total_ap'      => $total_ap,
+        'total_gp'      => $total_gp,
+        'title'         => $title,
+        'is_pro'        => self::is_pro_user($user_id),
+        'stats'         => (object) $agnostic_stats,
     ];
   }
 
   /**
-   * Centralized method to add XP, AP, GP and any dynamic stats
+   * Get Network Combined Stats (aggregated across all sites)
    */
-  public static function add_currency($user_id, $xp_or_payload = 0, $ap = 0, $gp = 0) {
-    if (!$user_id) return false;
+  public static function get_user_network_stats($user_id) {
+    if (!$user_id) {
+        return [
+            'combined_xp' => 0,
+            'combined_ap' => 0,
+            'combined_gp' => 0,
+            'sites'       => []
+        ];
+    }
 
-    // Handle legacy signature ($xp, $ap, $gp) or new payload signature (['xp' => 10, 'rp' => 5])
+    $sites_list = function_exists('get_sites') ? get_sites(['number' => 100]) : [];
+    $site_ids = [];
+    if (!empty($sites_list)) {
+        foreach ($sites_list as $site_obj) {
+            $site_ids[] = (int) $site_obj->blog_id;
+        }
+    } else {
+        $site_ids[] = 1;
+    }
+
+    $combined_xp = 0;
+    $combined_ap = 0;
+    $combined_gp = 0;
+    $site_breakdown = [];
+
+    foreach ($site_ids as $sid) {
+        $site_stats = self::get_user_stats($user_id, $sid);
+        $combined_xp += $site_stats['total_xp'];
+        $combined_ap += $site_stats['total_ap'];
+        $combined_gp += $site_stats['total_gp'];
+        $site_breakdown[$sid] = $site_stats;
+    }
+
+    return [
+        'combined_xp' => $combined_xp,
+        'combined_ap' => $combined_ap,
+        'combined_gp' => $combined_gp,
+        'sites'       => $site_breakdown,
+    ];
+  }
+
+  /**
+   * Centralized method to add XP, AP, GP and dynamic stats (Site-scoped)
+   */
+  public static function add_currency($user_id, $xp_or_payload = 0, $ap = 0, $gp = 0, $blog_id = null) {
+    if (!$user_id) return false;
+    if (!$blog_id) {
+        $blog_id = self::get_current_site_id();
+    }
+
     $payload = is_array($xp_or_payload) ? $xp_or_payload : [
         'xp' => $xp_or_payload,
         'ap' => $ap,
         'gp' => $gp
     ];
 
-    // XP and AP are exclusive to PRO accounts
     if ( ! self::is_pro_user($user_id) ) {
         if (isset($payload['xp'])) $payload['xp'] = 0;
         if (isset($payload['ap'])) $payload['ap'] = 0;
     }
 
-    $stats = self::get_user_stats($user_id);
+    $stats = self::get_user_stats($user_id, $blog_id);
     $old_level = $stats['level'];
-
-    $registered_stats = class_exists('Xophz_Compass_Xp_Registry') ? Xophz_Compass_Xp_Registry::get_registered_stats() : [];
+    $site_key_prefix = "_xp_s{$blog_id}_";
 
     foreach ($payload as $stat_slug => $amount) {
         $amount = (int) $amount;
         if ($amount === 0) continue;
 
-        // Legacy mapping for xp, ap, gp
         if (in_array($stat_slug, ['xp', 'ap', 'gp'])) {
             $current_val = $stats["total_{$stat_slug}"];
-            update_user_meta($user_id, "_xp_total_{$stat_slug}", $current_val + $amount);
+            $new_val = $current_val + $amount;
+            update_user_meta($user_id, "{$site_key_prefix}total_{$stat_slug}", $new_val);
+            if ($blog_id === 1 || !is_multisite()) {
+                update_user_meta($user_id, "_xp_total_{$stat_slug}", $new_val);
+            }
         } else {
-            // Only modify stat if it is registered or explicitly requested
-            self::modify_stat($user_id, $stat_slug, $amount);
+            self::modify_stat($user_id, $stat_slug, $amount, $blog_id);
         }
     }
 
-    // Re-evaluate level
-    $new_stats = self::get_user_stats($user_id);
+    $new_stats = self::get_user_stats($user_id, $blog_id);
     if ($new_stats['level'] > $old_level) {
-        do_action('xophz_compass_user_leveled_up', $user_id, $new_stats['level'], $old_level);
-        
-        // Let's log the level up!
+        do_action('xophz_compass_user_leveled_up', $user_id, $new_stats['level'], $old_level, $blog_id);
         if (class_exists('Xophz_Compass_Xp_Logs')) {
-             // We can fire an action that logs it, or assume Goals will handle it.
-             do_action('xophz_compass_record_action', 'level_up', $user_id, ['new_level' => $new_stats['level']]);
+             do_action('xophz_compass_record_action', 'level_up', $user_id, ['new_level' => $new_stats['level'], 'site_id' => $blog_id]);
         }
     }
 
@@ -157,13 +250,20 @@ class Xophz_Compass_Xp_Players {
   }
   
   /**
-   * Add / Update Agnostic Stat
+   * Add / Update Agnostic Stat (Site-scoped)
    */
-  public static function modify_stat($user_id, $stat_slug, $amount) {
+  public static function modify_stat($user_id, $stat_slug, $amount, $blog_id = null) {
       if (!$user_id) return false;
-      $current = (int) get_user_meta($user_id, "_xp_stat_{$stat_slug}", true) ?: 0;
+      if (!$blog_id) {
+          $blog_id = self::get_current_site_id();
+      }
+      $site_key_prefix = "_xp_s{$blog_id}_";
+      $current = (int) get_user_meta($user_id, "{$site_key_prefix}stat_{$stat_slug}", true) ?: 0;
       $new_val = $current + $amount;
-      update_user_meta($user_id, "_xp_stat_{$stat_slug}", $new_val);
+      update_user_meta($user_id, "{$site_key_prefix}stat_{$stat_slug}", $new_val);
+      if ($blog_id === 1 || !is_multisite()) {
+          update_user_meta($user_id, "_xp_stat_{$stat_slug}", $new_val);
+      }
       return $new_val;
   }
 
@@ -244,13 +344,18 @@ class Xophz_Compass_Xp_Players {
   public function rest_get_state(WP_REST_Request $request) {
       $user_id = get_current_user_id();
       $is_logged_in = is_user_logged_in();
-      $state = self::get_user_stats($user_id);
+      $site_id_param = $request->get_param('site_id');
+      $blog_id = $site_id_param ? (int) $site_id_param : self::get_current_site_id();
+
+      $state = self::get_user_stats($user_id, $blog_id);
+      $network_summary = self::get_user_network_stats($user_id);
       
       return rest_ensure_response([
-          'is_logged_in' => $is_logged_in,
-          'user_id' => $user_id,
-          'is_pro' => self::is_pro_user($user_id),
-          'state' => $state
+          'is_logged_in'    => $is_logged_in,
+          'user_id'         => $user_id,
+          'is_pro'          => self::is_pro_user($user_id),
+          'state'           => $state,
+          'network_summary' => $network_summary
       ]);
   }
 
@@ -258,19 +363,23 @@ class Xophz_Compass_Xp_Players {
       $user_id = get_current_user_id();
       $params = $request->get_json_params();
       $ap_decay = isset($params['ap']) ? (int) $params['ap'] : 0;
+      $blog_id = self::get_current_site_id();
       
-      $stats = self::get_user_stats($user_id);
-      $new_ap = max(0, $stats['total_ap'] - $ap_decay);
+      $stats = self::get_user_stats($user_id, $blog_id);
+      $actual_decay = min($stats['total_ap'], $ap_decay);
       
-      update_user_meta($user_id, '_xp_total_ap', $new_ap);
+      if ($actual_decay > 0) {
+          self::add_currency($user_id, 0, -$actual_decay, 0, $blog_id);
+      }
       
       if (class_exists('Xophz_Compass_Xp_Logs')) {
-          do_action('xophz_compass_record_action', 'Simulate Weekly AP Decay', $user_id, ['ap' => -$ap_decay]);
+          do_action('xophz_compass_record_action', 'Simulate Weekly AP Decay', $user_id, ['ap' => -$ap_decay, 'site_id' => $blog_id]);
       }
       
       return rest_ensure_response([
-          'success' => true,
-          'state' => self::get_user_stats($user_id)
+          'success'         => true,
+          'state'           => self::get_user_stats($user_id, $blog_id),
+          'network_summary' => self::get_user_network_stats($user_id)
       ]);
   }
 
@@ -279,23 +388,25 @@ class Xophz_Compass_Xp_Players {
       $params = $request->get_json_params();
       $gp_cost = isset($params['gp']) ? (int) $params['gp'] : 0;
       $item_name = isset($params['item']) ? sanitize_text_field($params['item']) : 'Unknown Item';
+      $blog_id = self::get_current_site_id();
       
-      $stats = self::get_user_stats($user_id);
+      $stats = self::get_user_stats($user_id, $blog_id);
+      $currency_name = $stats['currency_name'];
       
       if ($stats['total_gp'] < $gp_cost) {
-          return new WP_Error('insufficient_funds', 'Not enough Gold Points.', ['status' => 400]);
+          return new WP_Error('insufficient_funds', "Not enough {$currency_name}.", ['status' => 400]);
       }
       
-      $new_gp = $stats['total_gp'] - $gp_cost;
-      update_user_meta($user_id, '_xp_total_gp', $new_gp);
+      $updated_stats = self::add_currency($user_id, 0, 0, -$gp_cost, $blog_id);
       
       if (class_exists('Xophz_Compass_Xp_Logs')) {
-          do_action('xophz_compass_record_action', "Purchased: $item_name", $user_id, ['gp' => -$gp_cost]);
+          do_action('xophz_compass_record_action', "Purchased: $item_name", $user_id, ['gp' => -$gp_cost, 'site_id' => $blog_id]);
       }
       
       return rest_ensure_response([
-          'success' => true,
-          'state' => self::get_user_stats($user_id)
+          'success'         => true,
+          'state'           => $updated_stats,
+          'network_summary' => self::get_user_network_stats($user_id)
       ]);
   }
 
@@ -304,28 +415,35 @@ class Xophz_Compass_Xp_Players {
       $params = $request->get_json_params();
       $amount = isset($params['amount']) ? (int) $params['amount'] : 0;
       $reason = isset($params['reason']) ? sanitize_text_field($params['reason']) : 'Transaction';
-      
-      if ($amount === 0) {
-          return rest_ensure_response(['success' => true, 'balance' => (int)get_user_meta($user_id, '_xp_total_gp', true)]);
-      }
+      $blog_id = self::get_current_site_id();
 
-      $stats = self::get_user_stats($user_id);
-      
-      // If spending (negative amount), check funds
-      if ($amount < 0 && $stats['total_gp'] < abs($amount)) {
-          return new WP_Error('insufficient_funds', 'Not enough Bells.', ['status' => 400]);
+      $stats = self::get_user_stats($user_id, $blog_id);
+      $currency_name = $stats['currency_name'];
+
+      if ($amount === 0) {
+          return rest_ensure_response([
+              'success'         => true,
+              'balance'         => $stats['total_gp'],
+              'state'           => $stats,
+              'network_summary' => self::get_user_network_stats($user_id)
+          ]);
       }
       
-      $new_gp = $stats['total_gp'] + $amount;
-      update_user_meta($user_id, '_xp_total_gp', $new_gp);
+      if ($amount < 0 && $stats['total_gp'] < abs($amount)) {
+          return new WP_Error('insufficient_funds', "Not enough {$currency_name}.", ['status' => 400]);
+      }
+      
+      $updated_stats = self::add_currency($user_id, 0, 0, $amount, $blog_id);
       
       if (class_exists('Xophz_Compass_Xp_Logs')) {
-          do_action('xophz_compass_record_action', "Transaction: $reason", $user_id, ['gp' => $amount]);
+          do_action('xophz_compass_record_action', "Transaction: $reason", $user_id, ['gp' => $amount, 'site_id' => $blog_id]);
       }
       
       return rest_ensure_response([
-          'success' => true,
-          'balance' => $new_gp
+          'success'         => true,
+          'balance'         => $updated_stats['total_gp'],
+          'state'           => $updated_stats,
+          'network_summary' => self::get_user_network_stats($user_id)
       ]);
   }
   

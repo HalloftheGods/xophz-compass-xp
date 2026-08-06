@@ -65,6 +65,7 @@ register_deactivation_hook( __FILE__, 'deactivate_xophz_compass_xp' );
  * admin-specific hooks, and public-facing site hooks.
  */
 require plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-xp.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-xp-abilities.php';
 
 /**
  * Begins execution of the plugin.

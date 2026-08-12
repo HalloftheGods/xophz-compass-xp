@@ -62,6 +62,11 @@ class Xophz_Compass_Xp_Admin {
     'wp_ajax_xp_load_log' => 'loadLog',
     'wp_ajax_nopriv_xp_load_log' => 'loadLog',
     'wp_ajax_xp_sync_gp_debt' => 'syncGpDebt',
+    'wp_ajax_xp_get_settings' => 'getSettings',
+    'wp_ajax_xp_save_settings' => 'saveSettings',
+    'wp_ajax_xp_get_bank_ledger' => 'getBankLedger',
+    'wp_ajax_xp_bank_convert' => 'bankConvert',
+    'wp_ajax_xp_get_user_hooks' => 'getUserHooks',
   ];
 
   public $filter_hooks = [
@@ -375,22 +380,20 @@ class Xophz_Compass_Xp_Admin {
     $gp = (object)[];
 
     $level->text = "level {$user_level}";
-    $level->icon = "fa-hand-holding-seedling";
+    $level->icon = "fad fa-seedling";
     $level->color= "green";
 
-
     $xp->text = "XP {$user_xp}";
-    $xp->icon = "fa-hand-holding-magic";
-    $xp->color= "blue";
-    
+    $xp->icon = "fad fa-sparkles";
+    $xp->color= "cyan";
 
     $ap->text = "AP $user_ap";
-    $ap->icon = "fa-hand-holding-heart";
-    $ap->color= "red";
-    
+    $ap->icon = "fad fa-bolt";
+    $ap->color= "pink";
+
     $gp->text = "GP $user_gp";
-    $gp->icon = "fa-hand-holding-usd";
-    $gp->color= "orange";
+    $gp->icon = "fad fa-coins";
+    $gp->color= "amber";
 
     $chips[] = $xp;
     $chips[] = $gp;
@@ -620,5 +623,74 @@ class Xophz_Compass_Xp_Admin {
     }
 
     return $logs;
+  }
+
+  public function getSettings() {
+    $settings = Xophz_Compass_Xp_Settings::get_settings();
+    $currencies = Xophz_Compass_Xp_Bank::get_default_currencies();
+    Xophz_Compass::output_json([
+      'success' => true,
+      'settings' => $settings,
+      'currencies' => $currencies,
+    ]);
+  }
+
+  public function saveSettings() {
+    $args = Xophz_Compass::get_input_json();
+    $settings_data = json_decode(json_encode($args), true);
+    $saved = Xophz_Compass_Xp_Settings::save_settings($settings_data);
+    Xophz_Compass::output_json([
+      'success' => true,
+      'settings' => $saved,
+    ]);
+  }
+
+  public function getBankLedger() {
+    $user_id = get_current_user_id();
+    $ledger = Xophz_Compass_Xp_Bank::get_ledger($user_id, 100);
+    $balances = Xophz_Compass_Xp_Bank::get_balances($user_id);
+    Xophz_Compass::output_json([
+      'success' => true,
+      'ledger' => $ledger,
+      'balances' => $balances,
+    ]);
+  }
+
+  public function bankConvert() {
+    $args = Xophz_Compass::get_input_json();
+    $user_id = get_current_user_id();
+    $from_curr = isset($args->from_currency) ? sanitize_text_field($args->from_currency) : 'gp';
+    $to_curr = isset($args->to_currency) ? sanitize_text_field($args->to_currency) : 'ai_tokens';
+    $from_amount = isset($args->from_amount) ? floatval($args->from_amount) : 0;
+
+    $settings = Xophz_Compass_Xp_Settings::get_settings();
+    $rate = 1.0;
+    if ($from_curr === 'gp' && $to_curr === 'ai_tokens') {
+      $rate = floatval($settings['currencies']['gp_to_ai_tokens']['rate']);
+    } else if ($from_curr === 'gp' && $to_curr === 'memecoin') {
+      $rate = floatval($settings['currencies']['gp_to_memecoin']['rate']);
+    }
+
+    $res = Xophz_Compass_Xp_Bank::convert_currency($user_id, $from_curr, $to_curr, $from_amount, $rate);
+    if (is_wp_error($res)) {
+      Xophz_Compass::output_json([
+        'success' => false,
+        'message' => $res->get_error_message(),
+      ]);
+    } else {
+      Xophz_Compass::output_json([
+        'success' => true,
+        'result' => $res,
+      ]);
+    }
+  }
+
+  public function getUserHooks() {
+    $user_id = get_current_user_id();
+    $hooks = Xophz_Compass_Xp_Settings::get_user_hooks($user_id);
+    Xophz_Compass::output_json([
+      'success' => true,
+      'hooks' => $hooks,
+    ]);
   }
 }

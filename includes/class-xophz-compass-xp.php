@@ -123,6 +123,8 @@ class Xophz_Compass_Xp {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-goals.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-badges.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-keys.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-bank.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-settings.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-xp-subscriptions.php';
 
     /**

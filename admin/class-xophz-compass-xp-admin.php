@@ -57,16 +57,20 @@ class Xophz_Compass_Xp_Admin {
     'woocommerce_prevent_admin_access' => 'preventAdminAccess',
     'wp_ajax_level_up' => 'levelUp',
     'wp_ajax_list_billboard_chips' => 'listBillboardChips',
+    'wp_ajax_nopriv_list_billboard_chips' => 'listBillboardChips',
     'wp_ajax_xp_get_user' => 'getUser',
     'wp_ajax_nopriv_xp_get_user' => 'getUser',
     'wp_ajax_xp_load_log' => 'loadLog',
     'wp_ajax_nopriv_xp_load_log' => 'loadLog',
     'wp_ajax_xp_sync_gp_debt' => 'syncGpDebt',
     'wp_ajax_xp_get_settings' => 'getSettings',
+    'wp_ajax_nopriv_xp_get_settings' => 'getSettings',
     'wp_ajax_xp_save_settings' => 'saveSettings',
     'wp_ajax_xp_get_bank_ledger' => 'getBankLedger',
+    'wp_ajax_nopriv_xp_get_bank_ledger' => 'getBankLedger',
     'wp_ajax_xp_bank_convert' => 'bankConvert',
     'wp_ajax_xp_get_user_hooks' => 'getUserHooks',
+    'wp_ajax_nopriv_xp_get_user_hooks' => 'getUserHooks',
   ];
 
   public $filter_hooks = [
@@ -368,10 +372,10 @@ class Xophz_Compass_Xp_Admin {
   public function listBillboardChips(){
     $user_id = get_current_user_id();
 
-    $user_xp = get_user_meta($user_id, '_xp_total_xp', true) ;
-    $user_ap = get_user_meta($user_id, '_xp_total_ap', true) ;
-    $user_gp = get_user_meta($user_id, '_xp_total_gp', true) ;
-    $user_level = get_user_meta($user_id, '_xp_total_level', true)  ;
+    $user_xp = $user_id ? (int) get_user_meta($user_id, '_xp_total_xp', true) : 0;
+    $user_ap = $user_id ? (int) get_user_meta($user_id, '_xp_total_ap', true) : 0;
+    $user_gp = $user_id ? (int) get_user_meta($user_id, '_xp_total_gp', true) : 0;
+    $user_level = $user_id ? (int) get_user_meta($user_id, '_xp_total_level', true) : 0;
 
     $chips = [];
     $level = (object)[];

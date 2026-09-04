@@ -8,7 +8,7 @@
  * registers the activation and deactivation functions, and defines a function
  * that starts the plugin.
  *
- * @link              http://example.com
+ * @link              https://youmeos.com
  * @since             1.0.0
  * @package           Xophz_Compass_Xp
  *
@@ -53,8 +53,7 @@ function activate_xophz_compass_xp() {
  * This action is documented in includes/class-xophz-compass-xp-deactivator.php
  */
 function deactivate_xophz_compass_xp() {
-  require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-xp-deactivator.php';
-  Xophz_Compass_Xp_Deactivator::deactivate();
+	Xophz_Compass_Xp::deactivate();
 }
 
 register_activation_hook( __FILE__, 'activate_xophz_compass_xp' );

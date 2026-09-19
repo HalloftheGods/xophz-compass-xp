@@ -16,7 +16,7 @@
  * Category:          True North
  * Group:             LXP
  * Plugin Name:       Xophz For the XP
- * Plugin URI:        https://github.com/HalloftheGods/xophz-compass-xp
+ * Plugin URI:        https://forthexp.com
  * Description:       Reward your visitor's loyalty by gamifying their actions and milestones with points, badges, and levels.
  * Version:           26.9.5
  * Author:            Hall of the Gods, Inc. 

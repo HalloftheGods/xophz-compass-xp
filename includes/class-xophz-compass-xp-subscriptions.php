@@ -251,7 +251,8 @@ class Xophz_Compass_Xp_Subscriptions {
     $tier     = sanitize_text_field( $params['tier'] ?? $request->get_param( 'tier' ) ?: 'developer' );
     $interval = sanitize_text_field( $params['interval'] ?? $request->get_param( 'interval' ) ?: 'monthly' );
     $coupon   = strtoupper( trim( sanitize_text_field( $params['coupon'] ?? $request->get_param( 'coupon' ) ?: '' ) ) );
-    $user_id  = get_current_user_id() ?: 1;
+    // Anonymous callers stay user 0. They are never attributed to user 1 (the site owner).
+    $user_id  = get_current_user_id();
 
     // 1. Allow external plugins first right of refusal via custom hook
     $custom_session = apply_filters( 'xp_subscription_checkout_session', null, $tier, $interval, $user_id, $coupon, $request );
@@ -302,49 +303,14 @@ class Xophz_Compass_Xp_Subscriptions {
 
     $secret_key = $this->get_secret_key();
 
-    // Mock checkout fallback when Stripe secret key is absent or test mock
-    if ( empty( $secret_key ) || strpos( $secret_key, 'sk_test_Mock' ) === 0 ) {
-      // Mint key through Gatekeeper if active, or local storage
-      $key_id = 'key_' . bin2hex( random_bytes( 6 ) );
-      $secret = 'xp_live_' . bin2hex( random_bytes( 16 ) );
-
-      if ( class_exists( 'Gatekeeper_Keys' ) ) {
-        $gk_record = Gatekeeper_Keys::generate_key(
-          $user_id,
-          'XP SaaS Key - ' . $selected_tier['name'],
-          $selected_tier['scopes'],
-          'xp_live'
-        );
-        $secret = $gk_record['plain_key'];
-      } else {
-        $keys = get_user_meta( $user_id, '_xp_api_keys', true ) ?: array();
-        $keys[ $key_id ] = array(
-          'id'         => $key_id,
-          'key'        => $secret,
-          'label'      => 'XP SaaS Key - ' . $selected_tier['name'],
-          'tier'       => $tier,
-          'created_at' => date( 'Y-m-d H:i:s' ),
-          'status'     => 'active',
-        );
-        update_user_meta( $user_id, '_xp_api_keys', $keys );
-      }
-
-      return rest_ensure_response( array(
-        'url'              => add_query_arg(
-          array(
-            'mock_subscription' => '1',
-            'tier'              => $tier,
-            'interval'          => $interval,
-            'base_price'        => number_format( $base_price, 2 ),
-            'issued_key'        => $secret,
-          ),
-          $success_url
-        ),
-        'is_mock'          => true,
-        'base_price'       => $base_price,
-        'issued_key'       => $secret,
-        'message'          => 'Mock checkout succeeded and API key issued!',
-      ) );
+    // Fail closed. Without a real Stripe key there is no checkout, and this route never issues an API key:
+    // a paid key comes from the Stripe webhook (Gatekeeper) after a completed payment.
+    if ( '' === $secret_key || 0 === strpos( $secret_key, 'sk_test_Mock' ) ) {
+      return new WP_Error(
+        'payments_not_configured',
+        'Payments are not configured on this site, so no checkout session was created.',
+        array( 'status' => 503 )
+      );
     }
 
     // Direct Stripe API invocation fallback

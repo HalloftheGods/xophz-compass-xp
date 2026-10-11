@@ -9,6 +9,12 @@
 
 class Xophz_Compass_Xp_Actions {
 
+  /**
+   * The capability the XP admin UI runs under (the Compass menu requires it). Reading action
+   * tokens, editing actions and firing an action for another user without its token need it.
+   */
+  const ADMIN_CAPABILITY = 'manage_options';
+
   private $plugin_name;
   private $version;
 
@@ -91,7 +97,9 @@ class Xophz_Compass_Xp_Actions {
       $action_slug = $post->post_name; // Fallback to WP slug
     }
 
-    $webhook_url = rest_url( 'xp/v1/fire/' . $action_slug );
+    $webhook_url   = rest_url( 'xp/v1/fire/' . $action_slug );
+    $can_see_token = current_user_can( self::ADMIN_CAPABILITY );
+    $token_display = $can_see_token ? $action_token : '(visible to administrators only)';
     ?>
     <p>
       <label for="xp_action_slug"><strong>Action Slug (Metric Key)</strong></label><br>
@@ -101,7 +109,7 @@ class Xophz_Compass_Xp_Actions {
 
     <p>
       <label for="xp_action_token"><strong>Security Token</strong></label><br>
-      <input type="text" id="xp_action_token" name="xp_action_token" value="<?php echo esc_attr( $action_token ); ?>" style="width: 100%; max-width: 400px;" readonly>
+      <input type="text" id="xp_action_token" name="xp_action_token" value="<?php echo esc_attr( $token_display ); ?>" style="width: 100%; max-width: 400px;" readonly>
       <br><small>Required for external webhook triggers.</small>
     </p>
 
@@ -109,10 +117,10 @@ class Xophz_Compass_Xp_Actions {
     <h4>Clean URL Endpoint</h4>
     <p>You can trigger this action externally by sending a GET or POST request to the following URL, with the Security Token in a request header:</p>
     <pre style="background: #1e1e1e; color: #a6e22e; padding: 15px; border-radius: 5px; overflow-x: auto;">
-<?php echo esc_html( $webhook_url . '?user_id=USER_ID_HERE' . "\n" . 'X-XP-Token: ' . $action_token ); ?>
+<?php echo esc_html( $webhook_url . '?user_id=USER_ID_HERE' . "\n" . 'X-XP-Token: ' . $token_display ); ?>
     </pre>
     <p><em>The token is read from the <code>X-XP-Token</code> header only. It is never accepted in the URL, so it stays out of access logs and referrers.</em></p>
-    <p><em>Note: You must pass either <code>user_id</code> or <code>email</code> as a parameter so the system knows who to award the action to. If the user is logged in natively, this parameter can be omitted.</em></p>
+    <p><em>Note: You must pass either <code>user_id</code> or <code>email</code> as a parameter so the system knows who to award the action to. If the user is logged in natively, this parameter can be omitted. Without the token, a logged-in user can fire an action only for their own account.</em></p>
     <?php
   }
 
@@ -134,21 +142,25 @@ class Xophz_Compass_Xp_Actions {
       'permission_callback' => '__return_true', // Validation handled in callback via token
     ));
 
+    // Both responses carry action tokens, so they need the admin UI's capability, not edit_posts.
     register_rest_route( 'xp/v1', '/actions', array(
       'methods'  => WP_REST_Server::READABLE,
       'callback' => array( $this, 'rest_get_actions' ),
-      'permission_callback' => function () {
-        return current_user_can( 'edit_posts' );
-      }
+      'permission_callback' => array( $this, 'can_manage_actions' ),
     ));
 
     register_rest_route( 'xp/v1', '/actions(?:/(?P<id>\d+))?', array(
       'methods'  => WP_REST_Server::CREATABLE,
       'callback' => array( $this, 'rest_save_action' ),
-      'permission_callback' => function () {
-        return current_user_can( 'edit_posts' );
-      }
+      'permission_callback' => array( $this, 'can_manage_actions' ),
     ));
+  }
+
+  /**
+   * Permission callback for the action builder routes.
+   */
+  public function can_manage_actions(): bool {
+    return current_user_can( self::ADMIN_CAPABILITY );
   }
 
   public function rest_get_actions() {
@@ -286,22 +298,29 @@ class Xophz_Compass_Xp_Actions {
     }
 
     // Determine target user
-    $user_id = $request->get_param( 'user_id' );
-    $email = $request->get_param( 'email' );
+    $current_id = get_current_user_id();
+    $user_id    = absint( $request->get_param( 'user_id' ) );
+    $email      = sanitize_email( (string) $request->get_param( 'email' ) );
 
-    if ( empty($user_id) && !empty($email) ) {
+    if ( ! $user_id && '' !== $email ) {
       $user = get_user_by( 'email', $email );
       if ( $user ) {
-        $user_id = $user->ID;
+        $user_id = (int) $user->ID;
       }
     }
 
-    if ( empty($user_id) && $is_logged_in ) {
-      $user_id = get_current_user_id();
+    if ( ! $user_id && $is_logged_in ) {
+      $user_id = $current_id;
     }
 
-    if ( empty($user_id) ) {
+    if ( ! $user_id ) {
       return new WP_Error( 'missing_user', 'A user_id or email must be provided to fire an action.', array( 'status' => 400 ) );
+    }
+
+    // Without the action's token, a logged-in caller fires only for their own account. Firing for
+    // anyone else needs the token (external senders) or the XP admin UI's capability.
+    if ( ! $token_matches && $user_id !== $current_id && ! current_user_can( self::ADMIN_CAPABILITY ) ) {
+      return new WP_Error( 'forbidden_target', 'You can fire an action only for your own account.', array( 'status' => 403 ) );
     }
 
     // Collect payload (everything else passed in the request)

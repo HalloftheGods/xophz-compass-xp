@@ -107,10 +107,11 @@ class Xophz_Compass_Xp_Actions {
 
     <hr>
     <h4>Clean URL Endpoint</h4>
-    <p>You can trigger this action externally by sending a GET or POST request to the following URL:</p>
+    <p>You can trigger this action externally by sending a GET or POST request to the following URL, with the Security Token in a request header:</p>
     <pre style="background: #1e1e1e; color: #a6e22e; padding: 15px; border-radius: 5px; overflow-x: auto;">
-<?php echo esc_html( $webhook_url . '?token=' . $action_token . '&user_id=USER_ID_HERE' ); ?>
+<?php echo esc_html( $webhook_url . '?user_id=USER_ID_HERE' . "\n" . 'X-XP-Token: ' . $action_token ); ?>
     </pre>
+    <p><em>The token is read from the <code>X-XP-Token</code> header only. It is never accepted in the URL, so it stays out of access logs and referrers.</em></p>
     <p><em>Note: You must pass either <code>user_id</code> or <code>email</code> as a parameter so the system knows who to award the action to. If the user is logged in natively, this parameter can be omitted.</em></p>
     <?php
   }
@@ -245,9 +246,21 @@ class Xophz_Compass_Xp_Actions {
     ));
   }
 
+  /**
+   * The action token a sender presented, read from a request header only.
+   *
+   * Accepts `X-XP-Token: <token>`. The query string and the body are never read, so the token
+   * stays out of access logs, referrers and browser history. `Authorization: Bearer` is not
+   * used on purpose: the Gatekeeper plugin claims every Bearer header as an API key.
+   */
+  private function get_request_token( WP_REST_Request $request ): string {
+    $header = $request->get_header( 'x_xp_token' );
+    return is_string( $header ) ? trim( $header ) : '';
+  }
+
   public function rest_fire_action( WP_REST_Request $request ) {
     $action_slug = $request->get_param( 'action_slug' );
-    $token = $request->get_param( 'token' );
+    $token = $this->get_request_token( $request );
     
     // Find the registered action
     $actions = get_posts(array(
@@ -267,8 +280,9 @@ class Xophz_Compass_Xp_Actions {
 
     // Check auth
     $is_logged_in = is_user_logged_in();
-    if ( !$is_logged_in && (empty($token) || $token !== $valid_token) ) {
-      return new WP_Error( 'unauthorized', 'Invalid or missing security token', array( 'status' => 401 ) );
+    $token_matches = '' !== $token && is_string( $valid_token ) && '' !== $valid_token && hash_equals( $valid_token, $token );
+    if ( !$is_logged_in && !$token_matches ) {
+      return new WP_Error( 'unauthorized', 'Invalid or missing security token. Send it in the X-XP-Token header.', array( 'status' => 401 ) );
     }
 
     // Determine target user

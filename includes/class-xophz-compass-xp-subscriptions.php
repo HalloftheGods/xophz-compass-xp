@@ -398,13 +398,50 @@ class Xophz_Compass_Xp_Subscriptions {
     ) );
   }
 
-  private function get_secret_key() {
-    if ( defined( 'STRIPE_SECRET_KEY' ) ) {
-      return STRIPE_SECRET_KEY;
+  /**
+   * The Stripe secret key, resolved server-side through the WP Connectors API.
+   *
+   * @return string The key, or '' when the `stripe_secret_key` connector is unregistered or unset.
+   */
+  private function get_secret_key(): string {
+    return self::resolve_connector_key( 'stripe_secret_key' );
+  }
+
+  /**
+   * The one credential resolver for this plugin.
+   *
+   * Core exposes no public function that returns a key's value, so this follows core's own
+   * precedence (environment variable, PHP constant, database option). Every name comes from
+   * the connector's `authentication` definition; nothing is hard-coded here. The value is for
+   * server-side use only: never echo it, log it or place it in a URL.
+   *
+   * @param string $connector_id Connector id, e.g. 'stripe_secret_key'.
+   * @return string
+   */
+  private static function resolve_connector_key( string $connector_id ): string {
+    if ( ! function_exists( 'wp_get_connector' ) || ! wp_is_connector_registered( $connector_id ) ) {
+      return '';
     }
-    if ( ! empty( $_ENV['STRIPE_SECRET_KEY'] ) ) {
-      return $_ENV['STRIPE_SECRET_KEY'];
+
+    $connector = wp_get_connector( $connector_id );
+    $auth      = is_array( $connector ) ? ( $connector['authentication'] ?? array() ) : array();
+
+    $env_name = (string) ( $auth['env_var_name'] ?? '' );
+    $env      = '' === $env_name ? false : getenv( $env_name );
+    if ( is_string( $env ) && '' !== trim( $env ) ) {
+      return trim( $env );
     }
-    return get_option( 'compass_stripe_secret_key', get_option( 'xophz_compass_stripe_secret_key', '' ) );
+
+    $constant_name = (string) ( $auth['constant_name'] ?? '' );
+    if ( '' !== $constant_name && defined( $constant_name ) && is_scalar( constant( $constant_name ) ) ) {
+      $from_constant = trim( (string) constant( $constant_name ) );
+      if ( '' !== $from_constant ) {
+        return $from_constant;
+      }
+    }
+
+    $setting_name = (string) ( $auth['setting_name'] ?? '' );
+    $from_option  = '' === $setting_name ? '' : get_option( $setting_name, '' );
+    return is_scalar( $from_option ) ? trim( (string) $from_option ) : '';
   }
 }

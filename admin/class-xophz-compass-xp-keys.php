@@ -14,6 +14,9 @@
  * - An API key is read only from the X-API-Key header or Authorization: Bearer. A key in the
  *   query string is refused (URLs land in server and proxy logs); a body field is ignored.
  * - The plain key appears once, in the create response. Lists return a masked hint.
+ * - A key acts as its owner and only within its scopes: authenticate_api_key() hands the key's
+ *   stored scopes to Xophz_Compass_Xp_Key_Scopes, which holds the route-to-scope map and refuses
+ *   a route the key's scopes do not cover (403 xp_insufficient_scope, #5992).
  *
  * @package    Xophz_Compass_Xp
  * @subpackage Xophz_Compass_Xp/admin
@@ -26,9 +29,6 @@ class Xophz_Compass_Xp_Keys {
 
   private $plugin_name;
   private $version;
-
-  /** The request that authenticate_api_key() authenticated with an API key, if any. */
-  private $key_authenticated_request = null;
 
   public $action_hooks = [
     'rest_api_init' => 'register_key_rest_routes',
@@ -75,7 +75,7 @@ class Xophz_Compass_Xp_Keys {
    * @return bool|WP_Error False (401) when signed out, 403 when the request came in on an API key.
    */
   public function can_manage_keys( $request ) {
-    if ( null !== $this->key_authenticated_request && $request === $this->key_authenticated_request ) {
+    if ( Xophz_Compass_Xp_Key_Scopes::is_key_request( $request ) ) {
       return new WP_Error(
         'key_session_required',
         'API keys cannot list, create or revoke API keys. Sign in to manage keys.',
@@ -127,7 +127,7 @@ class Xophz_Compass_Xp_Keys {
             'label'       => $k['name'] ?? 'XP Key',
             'tier'        => empty( $scopes ) ? 'developer' : self::tier_from_scopes( $scopes ),
             'masked_key'  => $k['display_key'] ?? ( ( $k['prefix'] ?? '' ) . '...' ),
-            'scopes'      => empty( $scopes ) ? array( 'xp:read' ) : $scopes,
+            'scopes'      => $scopes, // What the key holds; a key with none gets 403 on every route.
             'created_at'  => $k['created_at'] ?? '',
             'last_used'   => ! empty( $k['last_used_at'] ) ? $k['last_used_at'] : 'Never',
             'status'      => $k['status'] ?? 'active',
@@ -136,10 +136,11 @@ class Xophz_Compass_Xp_Keys {
       }
 
       return rest_ensure_response( array(
-        'success'       => true,
-        'authority'     => 'gatekeeper',
-        'entitled_tier' => '' === $entitled ? null : $entitled,
-        'keys'          => $formatted,
+        'success'         => true,
+        'authority'       => 'gatekeeper',
+        'entitled_tier'   => '' === $entitled ? null : $entitled,
+        'entitled_scopes' => Xophz_Compass_Xp_Key_Grants::grantable_scopes( $entitled ),
+        'keys'            => $formatted,
       ) );
     }
 
@@ -156,7 +157,7 @@ class Xophz_Compass_Xp_Keys {
         'label'       => $k['label'] ?? 'API Key',
         'tier'        => $k['tier'] ?? 'developer',
         'masked_key'  => $masked,
-        'scopes'      => $k['scopes'] ?? array( 'xp:read', 'xp:write' ),
+        'scopes'      => (array) ( $k['scopes'] ?? array() ),
         'created_at'  => $k['created_at'] ?? '',
         'last_used'   => $k['last_used'] ?? 'Never',
         'status'      => $k['status'] ?? 'active',
@@ -164,10 +165,11 @@ class Xophz_Compass_Xp_Keys {
     }, array_values( $keys ) );
 
     return rest_ensure_response( array(
-      'success'       => true,
-      'authority'     => 'local',
-      'entitled_tier' => '' === $entitled ? null : $entitled,
-      'keys'          => $formatted,
+      'success'         => true,
+      'authority'       => 'local',
+      'entitled_tier'   => '' === $entitled ? null : $entitled,
+      'entitled_scopes' => Xophz_Compass_Xp_Key_Grants::grantable_scopes( $entitled ),
+      'keys'            => $formatted,
     ) );
   }
 
@@ -350,7 +352,7 @@ class Xophz_Compass_Xp_Keys {
         }
         $request->set_param( '_gatekeeper_key_id', $validation['key_id'] ?? null );
         $request->set_param( '_gatekeeper_scopes', $validation['scopes'] ?? array() );
-        $this->key_authenticated_request = $request;
+        Xophz_Compass_Xp_Key_Scopes::bind( $request, (array) ( $validation['scopes'] ?? array() ) );
         return $result;
       }
       // If key was explicitly passed but invalid, return error immediately
@@ -384,7 +386,7 @@ class Xophz_Compass_Xp_Keys {
         $keys[ $k_id ]['last_used'] = current_time( 'mysql' );
         update_user_meta( $user->ID, self::LOCAL_META, $keys );
         wp_set_current_user( $user->ID );
-        $this->key_authenticated_request = $request;
+        Xophz_Compass_Xp_Key_Scopes::bind( $request, (array) ( $k_data['scopes'] ?? array() ) );
         return $result;
       }
     }

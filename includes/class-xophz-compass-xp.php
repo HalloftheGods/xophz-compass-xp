@@ -131,6 +131,7 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-goals.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-badges.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-key-grants.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-key-scopes.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-keys.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-bank.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-xp-settings.php';
@@ -181,6 +182,7 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     $this->define_class_hooks( 'Xophz_Compass_Xp_Goals' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Badges' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Key_Grants' );
+    $this->define_class_hooks( 'Xophz_Compass_Xp_Key_Scopes' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Keys' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Subscriptions' );
   } 

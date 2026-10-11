@@ -147,6 +147,24 @@ class Xophz_Compass_Xp_Key_Grants {
   }
 
   /**
+   * The scopes the current user's key of $tier gets: the tier's scopes from the pricing matrix,
+   * without xp:admin unless the caller has manage_options. [] for '' or an unknown tier.
+   *
+   * GET /keys returns these for the entitled tier (`entitled_scopes`) so a UI can default to them.
+   */
+  public static function grantable_scopes( string $tier ): array {
+    $pricing = self::pricing();
+    if ( '' === $tier || ! isset( $pricing[ $tier ] ) ) {
+      return array();
+    }
+    $scopes = (array) $pricing[ $tier ]['scopes'];
+    if ( current_user_can( self::ADMIN_CAPABILITY ) ) {
+      return array_values( $scopes );
+    }
+    return array_values( array_diff( $scopes, array( self::ADMIN_SCOPE ) ) );
+  }
+
+  /**
    * Work out the owner, label, tier and scopes of a key the current user may create.
    *
    * @return array|WP_Error [ 'user_id' => int, 'label' => string, 'tier' => string, 'scopes' => string[] ]
@@ -213,7 +231,7 @@ class Xophz_Compass_Xp_Key_Grants {
 
     // A subscriber gets the scopes of their tier, without xp:admin, which needs manage_options.
     // Compared in Gatekeeper's stored form, so "xpadmin" cannot stand in for "xp:admin".
-    $allowed      = array_values( array_diff( $tier_scopes, array( self::ADMIN_SCOPE ) ) );
+    $allowed      = self::grantable_scopes( $tier );
     $allowed_keys = array_map( array( __CLASS__, 'scope_key' ), $allowed );
     $refused      = array_values( array_filter( $requested_scopes, function( $scope ) use ( $allowed_keys ) {
       return ! in_array( self::scope_key( $scope ), $allowed_keys, true );

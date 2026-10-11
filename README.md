@@ -48,6 +48,27 @@ The XP System Native Views (`/routes/xp/`) aggressively utilize COMPASS atomic U
 | `Xophz_Compass_Xp` | `class-xophz-compass-xp.php` | Core plugin loader and global point hooks |
 | `Xophz_Compass_Xp_Public` | `class-xophz-compass-xp-public.php` | Enqueues public-facing assets and scripts |
 | `Xophz_Compass_Xp_Admin` | `class-xophz-compass-xp-admin.php` | Exposes admin configurations and menus |
+| `Xophz_Compass_Xp_Keys` | `admin/class-xophz-compass-xp-keys.php` | `/xp/v1/keys` and API key authentication |
+| `Xophz_Compass_Xp_Key_Grants` | `admin/class-xophz-compass-xp-key-grants.php` | Which tier and scopes a caller may put on a key |
+| `Xophz_Compass_Xp_Key_Scopes` | `admin/class-xophz-compass-xp-key-scopes.php` | Route-to-scope map and its enforcement |
+
+## API Keys and Scopes
+
+Send a key in the `X-API-Key` header or as `Authorization: Bearer <key>`. A key in the URL (`?api_key=`) gets 400 `xp_api_key_in_url`; rotate any key that was sent that way. Keys are stored as SHA-256 hashes; the plain key is shown once, when it is created.
+
+A key acts as its owner (the owner's capability checks still apply) and only within its scopes. A key without the scope a route needs gets 403 `xp_insufficient_scope`. A key that carries any scope XP does not recognise, or no scopes, is refused on every route. `admin:all` covers every scope. Signed-in (cookie and nonce) requests are not scoped. The map lives in `Xophz_Compass_Xp_Key_Scopes::ROUTES`; a route missing from it refuses keys.
+
+| Route | Method | Scope |
+|---|---|---|
+| `/xp/v1`, `/state`, `/logs`, `/my-badges`, `/my-metrics`, `/badges`, `/goals`, `/subscriptions/checkout-url` | GET | `xp:read` |
+| `/simulate-decay` | POST | `xp:write` |
+| `/fire/{action_slug}` | GET, POST | `xp:actions:trigger` |
+| `/spend-gp`, `/transaction` | POST | `xp:bank` |
+| `/goals`, `/goals/{id}`, `/actions`, `/actions/{id}`, `/pro` | POST | `xp:admin` |
+| `/actions` | GET | `xp:admin` |
+| `/keys`, `/keys/{id}`, `/subscriptions/checkout` | any | none: a key gets 403 `key_session_required` |
+
+`xp:leaderboards` is recognised but no route needs it yet. HEAD is scoped as GET; PUT and PATCH as POST.
 
 ## Changelog
 

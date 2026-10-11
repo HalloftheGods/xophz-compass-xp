@@ -334,10 +334,12 @@ class Xophz_Compass_Xp_Players {
       'permission_callback' => function() { return is_user_logged_in(); },
     ));
 
+    // Pro status is an entitlement, so a user must not grant it to themselves (#5996).
+    // No frontend calls this route; paid status comes from the subscription flow.
     register_rest_route( 'xp/v1', '/pro', array(
       'methods'  => 'POST',
       'callback' => array( $this, 'rest_set_pro_status' ),
-      'permission_callback' => function() { return is_user_logged_in(); },
+      'permission_callback' => function() { return current_user_can( 'manage_options' ); },
     ));
   }
 

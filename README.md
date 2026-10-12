@@ -41,6 +41,20 @@ The XP System Native Views (`/routes/xp/`) aggressively utilize COMPASS atomic U
 |---|---|---|
 | `/xp` | Leaderboard | The global XP dashboard, rankings, and player stat breakdowns |
 
+## Hosting the Do It For The XP App
+
+XP can serve the [Do It For The XP](https://github.com/xopherdeep/do-it-for-the-xp) frontend at any permalink. The build is not shipped with the plugin (`public/dist/` is gitignored):
+
+1. In the app repo, run `pnpm build`.
+2. Upload the contents of its `dist/` folder to `wp-content/plugins/xophz-compass-xp/public/dist/`.
+3. Open **Settings → Do It For The XP** and choose the permalink (default `doit`, nested paths like `play/doit` work). Optionally also load the app as the homepage or on a chosen page.
+
+Until `public/dist/index.html` exists, XP registers no routes and the settings page only says where to upload. Rewrite rules flush by themselves when the build appears or disappears or the settings change. Updating the plugin by replacing its folder deletes the upload, so re-upload after such an update.
+
+When hosted, the page sets `window.__XP_PUBLIC_PATH__` (so the app loads its files straight from `public/dist/`) and `window.wpApiSettings` (so the app calls this site's REST API with a nonce). The page is marked `DONOTCACHEPAGE`.
+
+In dev mode (`WP_DEBUG`, `WP_ENV=development`) the app is served from its dev server on port 8100 even without a build. The proxy looks for it on the hosts in `COMPASS_DEV_HOST`, then `compass`, `127.0.0.1`, `localhost` and `host.docker.internal`; when WordPress runs in Docker and `ionic serve` runs on the host, set `COMPASS_DEV_HOST` to the Docker gateway (e.g. `172.17.0.1`).
+
 ## PHP Class Map
 
 | Class | File | Purpose |
@@ -48,6 +62,7 @@ The XP System Native Views (`/routes/xp/`) aggressively utilize COMPASS atomic U
 | `Xophz_Compass_Xp` | `class-xophz-compass-xp.php` | Core plugin loader and global point hooks |
 | `Xophz_Compass_Xp_Public` | `class-xophz-compass-xp-public.php` | Enqueues public-facing assets and scripts |
 | `Xophz_Compass_Xp_Admin` | `class-xophz-compass-xp-admin.php` | Exposes admin configurations and menus |
+| `Xophz_Compass_Xp_Doit` | `includes/class-xophz-compass-xp-doit.php` | Mounts the uploaded Do It For The XP build at a permalink; its settings page |
 | `Xophz_Compass_Xp_Keys` | `admin/class-xophz-compass-xp-keys.php` | `/xp/v1/keys` and API key authentication |
 | `Xophz_Compass_Xp_Key_Grants` | `admin/class-xophz-compass-xp-key-grants.php` | Which tier and scopes a caller may put on a key |
 | `Xophz_Compass_Xp_Key_Scopes` | `admin/class-xophz-compass-xp-key-scopes.php` | Route-to-scope map and its enforcement |

@@ -4,9 +4,13 @@
 
 import { harness } from '../../xophz-compass/tests/harness/test-framework.mjs';
 import './doit-mount.test.mjs';
+import './xp-pro-buy.test.mjs';
 
 const results = await harness.run();
 if (results.failed > 0) {
+  for (const f of results.failures) {
+    console.error(`FAIL ${f.suiteName} > ${f.testName}\n${f.error.split('\n').slice(0, 3).join('\n')}`);
+  }
   console.error(`XP Tests FAILED: ${results.failed} failed, ${results.passed} passed.`);
   process.exit(1);
 } else {

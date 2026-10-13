@@ -5,6 +5,7 @@
 import { harness } from '../../xophz-compass/tests/harness/test-framework.mjs';
 import './doit-mount.test.mjs';
 import './xp-pro-buy.test.mjs';
+import './family-rules.test.mjs';
 
 const results = await harness.run();
 if (results.failed > 0) {

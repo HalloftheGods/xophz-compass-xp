@@ -141,6 +141,7 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-rules.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-event-rules.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-schema.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-xp-town-hall.php';
 
     /**
     * The class responsible for defining all actions that occur in the public-facing
@@ -193,6 +194,7 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     $this->define_class_hooks( 'Xophz_Compass_Xp_Doit' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Pro' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Family_Schema' );
+    $this->define_class_hooks( 'Xophz_Compass_Xp_Town_Hall' );
   } 
 
   public function define_class_hooks($class){

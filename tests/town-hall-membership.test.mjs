@@ -116,6 +116,142 @@ describe('Town Hall membership: constants and hooks', () => {
       application_password_did_authenticate: ['on_authenticated', 10, 2],
     });
   });
+
+  it('filters pre_comment_approved after core and other plugins (priority 99, two arguments)', () => {
+    const res = runPhpJson(`${TOWN_HALL}
+      $th = new ${CLS}( 'xophz-compass-xp', '1' );
+      echo json_encode( $th->filter_hooks );`);
+    assert.deepStrictEqual(res, { pre_comment_approved: ['on_pre_comment_approved', 99, 2] });
+  });
+});
+
+/** Call comment_verdict once per row of arguments, in a single PHP run. */
+function commentVerdict(rows) {
+  return runPhpJson(`${TOWN_HALL}
+    $rows = ${lit(rows)};
+    $out = [];
+    foreach ( $rows as $args ) { $out[] = ${CLS}::comment_verdict( ...$args ); }
+    echo json_encode( $out );`);
+}
+
+describe('Town Hall comments: comment_verdict holds the game\'s comments for the owner', () => {
+  const ALLOWED = [DOIT];
+
+  it('holds a comment the game sent on the doit site, even one WordPress would approve at once', () => {
+    // [approved, is_multisite, site_url, allowed, app_id]
+    const res = commentVerdict([
+      [1, true, DOIT, ALLOWED, APP_ID],
+      ['1', true, `${DOIT}/`, ALLOWED, APP_ID],
+      [0, true, DOIT, ALLOWED, APP_ID],
+    ]);
+    assert.deepStrictEqual(res, [0, 0, 0]);
+  });
+
+  it('keeps a spam or trash verdict as it is', () => {
+    const res = commentVerdict([
+      ['spam', true, DOIT, ALLOWED, APP_ID],
+      ['trash', true, DOIT, ALLOWED, APP_ID],
+    ]);
+    assert.deepStrictEqual(res, ['spam', 'trash']);
+  });
+
+  it('leaves every other comment to WordPress: another app, no app password, another site, a single site', () => {
+    const res = commentVerdict([
+      [1, true, DOIT, ALLOWED, 'other-app'],
+      [1, true, DOIT, ALLOWED, ''],
+      [1, true, 'https://www.forthexp.com', ALLOWED, APP_ID],
+      [1, false, DOIT, ALLOWED, APP_ID],
+      [1, true, DOIT, [], APP_ID],
+    ]);
+    assert.deepStrictEqual(res, [1, 1, 1, 1, 1]);
+  });
+});
+
+/**
+ * Run on_pre_comment_approved against stubbed WordPress functions. `uuid` is what
+ * rest_get_authenticated_app_password() answers (null: the request did not sign in with an
+ * application password); `passwordAppId` is the app id of that password's record (null: no record).
+ */
+function runCommentHook({
+  approved = 1,
+  uuid = 'pw-1',
+  passwordAppId = APP_ID,
+  userId = 42,
+  multisite = true,
+  site = DOIT,
+  allowed = null,
+  hasAppPasswordApi = true,
+} = {}) {
+  const api = hasAppPasswordApi
+    ? `function rest_get_authenticated_app_password() { return ${lit(uuid)}; }`
+    : '';
+  return runBarePhpJson(`${TOWN_HALL}
+    $GLOBALS['xp_th'] = [ 'lookups' => [], 'filters' => [] ];
+    ${api}
+    function get_current_user_id() { return ${userId}; }
+    function is_multisite() { return ${multisite ? 'true' : 'false'}; }
+    function home_url() { return ${lit(site)}; }
+    function apply_filters( $tag, $value ) {
+      $GLOBALS['xp_th']['filters'][] = $tag;
+      return ${allowed === null ? '$value' : lit(allowed)};
+    }
+    class WP_Application_Passwords {
+      public static function get_user_application_password( $user_id, $uuid ) {
+        $GLOBALS['xp_th']['lookups'][] = [ $user_id, $uuid ];
+        $app_id = ${lit(passwordAppId)};
+        return null === $app_id ? null : [ 'uuid' => $uuid, 'app_id' => $app_id, 'name' => 'Do It For The XP' ];
+      }
+    }
+    $th = new ${CLS}( 'xophz-compass-xp', '1' );
+    $verdict = $th->on_pre_comment_approved( ${lit(approved)}, [ 'comment_post_ID' => 7, 'user_id' => ${userId} ] );
+    echo json_encode( [ 'verdict' => $verdict ] + $GLOBALS['xp_th'] );`);
+}
+
+describe('Town Hall comments: the pre_comment_approved hook', () => {
+  it('holds a comment sent with the game\'s application password, though its author wrote the post', () => {
+    const res = runCommentHook();
+    assert.strictEqual(res.verdict, 0);
+    assert.deepStrictEqual(res.lookups, [[42, 'pw-1']]);
+    assert.deepStrictEqual(res.filters, ['xp_town_hall_site_urls']);
+  });
+
+  it('keeps spam and trash', () => {
+    assert.strictEqual(runCommentHook({ approved: 'spam' }).verdict, 'spam');
+    assert.strictEqual(runCommentHook({ approved: 'trash' }).verdict, 'trash');
+  });
+
+  it('leaves a comment made without an application password alone, before any lookup', () => {
+    const res = runCommentHook({ uuid: null });
+    assert.strictEqual(res.verdict, 1);
+    assert.deepStrictEqual(res.lookups, []);
+    assert.deepStrictEqual(res.filters, []);
+    assert.strictEqual(runCommentHook({ uuid: '' }).verdict, 1);
+  });
+
+  it('leaves a comment sent with another app\'s password, or a password with no record, alone', () => {
+    const other = runCommentHook({ passwordAppId: 'other-app' });
+    assert.strictEqual(other.verdict, 1);
+    assert.deepStrictEqual(other.filters, []);
+    assert.strictEqual(runCommentHook({ passwordAppId: null }).verdict, 1);
+  });
+
+  it('leaves comments alone on another site, a single site, or for a visitor who is not signed in', () => {
+    assert.strictEqual(runCommentHook({ site: 'https://www.forthexp.com' }).verdict, 1);
+    assert.strictEqual(runCommentHook({ multisite: false }).verdict, 1);
+    const visitor = runCommentHook({ userId: 0 });
+    assert.strictEqual(visitor.verdict, 1);
+    assert.deepStrictEqual(visitor.lookups, []);
+  });
+
+  it('uses the same site allowlist filter as the membership hooks', () => {
+    const rehearsal = 'http://localhost:8090/doit';
+    assert.strictEqual(runCommentHook({ site: rehearsal }).verdict, 1);
+    assert.strictEqual(runCommentHook({ site: rehearsal, allowed: [rehearsal] }).verdict, 0);
+  });
+
+  it('does nothing on a WordPress without the application password API', () => {
+    assert.strictEqual(runCommentHook({ hasAppPasswordApi: false }).verdict, 1);
+  });
 });
 
 describe('Town Hall membership: should_join', () => {

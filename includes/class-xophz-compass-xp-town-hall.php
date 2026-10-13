@@ -13,6 +13,11 @@
  * when they open the approval screen (admin_init on authorize-application.php); the two hooks on the
  * password itself stay as a safety net for a parent who reached the password some other way.
  *
+ * Comments the game sends are held for the owner. WordPress approves a comment at once when its
+ * author wrote the post ("the author and the admins get respect"), so once the owner publishes a
+ * family's topic, the family's replies would go public with no approval. A comment made with the
+ * game's application password on the Do It For The XP site waits in moderation instead.
+ *
  * The class loads without WordPress; the WordPress calls live inside the hook methods.
  *
  * @package    Xophz_Compass_Xp
@@ -39,6 +44,11 @@ class Xophz_Compass_Xp_Town_Hall {
     'application_password_did_authenticate' => [ 'on_authenticated', 10, 2 ],
   ];
 
+  /** After core and other plugins (Akismet's spam verdict comes first and is kept). */
+  public $filter_hooks = [
+    'pre_comment_approved' => [ 'on_pre_comment_approved', 99, 2 ],
+  ];
+
   public function __construct( $plugin_name, $version ) {
     $this->plugin_name = $plugin_name;
     $this->version     = $version;
@@ -62,18 +72,55 @@ class Xophz_Compass_Xp_Town_Hall {
       return false;
     }
 
-    $site = self::address( $site_url );
-    if ( '' === $site ) {
-      return false;
+    return self::is_allowed_site( $site_url, $allowed );
+  }
+
+  /**
+   * The moderation verdict for a comment: 0 (held for the owner) when it was sent with the game's
+   * application password on an allowed site of a network, else the verdict WordPress reached.
+   * A 'spam' or 'trash' verdict, or an error, is never softened.
+   *
+   * Pure: every fact comes in as an argument.
+   *
+   * @param mixed  $approved     The verdict so far: 1, 0, 'spam', 'trash' or a WP_Error.
+   * @param bool   $is_multisite Whether WordPress runs as a network.
+   * @param string $site_url     The address of this site.
+   * @param array  $allowed      The addresses of the Do It For The XP sites.
+   * @param string $app_id       The app id of the application password the request signed in with ('' for none).
+   * @return mixed
+   */
+  public static function comment_verdict( $approved, bool $is_multisite, string $site_url, array $allowed, string $app_id ) {
+    $keeps_verdict = 'spam' === $approved || 'trash' === $approved || is_object( $approved );
+    if ( $keeps_verdict || ! $is_multisite || self::APP_ID !== $app_id ) {
+      return $approved;
     }
 
-    foreach ( $allowed as $url ) {
-      if ( is_string( $url ) && $site === self::address( $url ) ) {
-        return true;
-      }
+    return self::is_allowed_site( $site_url, $allowed ) ? 0 : $approved;
+  }
+
+  /**
+   * pre_comment_approved: hold a comment the game sent (see comment_verdict).
+   *
+   * @param mixed $approved    The verdict WordPress reached.
+   * @param array $commentdata The comment (unused: the request's sign-in decides).
+   * @return mixed
+   */
+  public function on_pre_comment_approved( $approved, $commentdata = [] ) {
+    $app_id = $this->request_app_id();
+    // Cheap exit before the allowlist filter; comment_verdict still makes the full decision.
+    if ( self::APP_ID !== $app_id ) {
+      return $approved;
     }
 
-    return false;
+    $allowed = apply_filters( 'xp_town_hall_site_urls', self::DEFAULT_SITE_URLS );
+
+    return self::comment_verdict(
+      $approved,
+      is_multisite(),
+      home_url(),
+      is_array( $allowed ) ? $allowed : self::DEFAULT_SITE_URLS,
+      $app_id
+    );
   }
 
   /**
@@ -121,6 +168,46 @@ class Xophz_Compass_Xp_Town_Hall {
   /** A site address without its trailing slashes. */
   private static function address( string $url ): string {
     return rtrim( $url, '/' );
+  }
+
+  /** Whether a site address is on the list, both compared without trailing slashes; an empty address never is. */
+  private static function is_allowed_site( string $site_url, array $allowed ): bool {
+    $site = self::address( $site_url );
+    if ( '' === $site ) {
+      return false;
+    }
+
+    foreach ( $allowed as $url ) {
+      if ( is_string( $url ) && $site === self::address( $url ) ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * The app id of the application password this request signed in with, or '' when it signed in
+   * some other way (a cookie, nothing) or the password has no record.
+   */
+  private function request_app_id(): string {
+    if ( ! function_exists( 'rest_get_authenticated_app_password' ) ) {
+      return '';
+    }
+
+    $uuid = rest_get_authenticated_app_password();
+    if ( ! is_string( $uuid ) || '' === $uuid ) {
+      return '';
+    }
+
+    $user_id = (int) get_current_user_id();
+    if ( $user_id < 1 ) {
+      return '';
+    }
+
+    $item = WP_Application_Passwords::get_user_application_password( $user_id, $uuid );
+
+    return is_array( $item ) ? self::item_app_id( $item ) : '';
   }
 
   /** The app id of an application password's record, or an empty string. */

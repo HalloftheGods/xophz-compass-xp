@@ -27,6 +27,10 @@ class Xophz_Compass_Xp_Family_Rest {
   /** Seconds between two last_seen_at updates of one phone. */
   const TOUCH_EVERY = 60;
 
+  /** Events GET /events returns when the caller names no limit, and the most it returns. */
+  const READ_LIMIT     = 100;
+  const READ_LIMIT_MAX = 200;
+
   private $plugin_name;
   private $version;
 
@@ -92,6 +96,11 @@ class Xophz_Compass_Xp_Family_Rest {
 
     register_rest_route( self::NAMESPACE, '/devices/(?P<id>\d+)', [
       [ 'methods' => WP_REST_Server::DELETABLE, 'callback' => [ $this, 'unlink_device' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/events', [
+      [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'send_events' ], 'permission_callback' => '__return_true' ],
+      [ 'methods' => WP_REST_Server::READABLE, 'callback' => [ $this, 'read_events' ], 'permission_callback' => '__return_true' ],
     ] );
   }
 
@@ -496,6 +505,52 @@ class Xophz_Compass_Xp_Family_Rest {
     $this->store()->revoke_device( (string) $family['family_id'], $id );
 
     return [ 'ok' => true ];
+  }
+
+  // --- the event stream ------------------------------------------------------------------------
+
+  /**
+   * POST /events { events: [...] } -> { accepted, duplicate, rejected: [ { id, code, message } ] }
+   * (see Xophz_Compass_Xp_Family_Events::send). Over the hourly limits: 429 with Retry-After.
+   */
+  public function send_events( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'send_events' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $result = Xophz_Compass_Xp_Family_Events::send( $this->store(), $family, $caller, $r->get_param( 'events' ) );
+    if ( is_wp_error( $result ) && 'xp_family_rate_limited' === $result->get_error_code() ) {
+      return self::limited( $result->get_error_message(), Xophz_Compass_Xp_Family_Event_Rules::RETRY_AFTER );
+    }
+
+    return $result;
+  }
+
+  /**
+   * GET /events?since=&limit= -> [ { seq, id, hero_id, device_id, kind, scope, at, received_at, data } ]
+   * (see Xophz_Compass_Xp_Family_Events::read): limit 100 by default, at most 200.
+   */
+  public function read_events( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'read_events' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $since = max( 0, (int) $r->get_param( 'since' ) );
+    $limit = null === $r->get_param( 'limit' ) ? self::READ_LIMIT : (int) $r->get_param( 'limit' );
+
+    return Xophz_Compass_Xp_Family_Events::read( $this->store(), $family, $caller, $since, max( 1, min( self::READ_LIMIT_MAX, $limit ) ) );
   }
 
   // --- helpers ---------------------------------------------------------------------------------

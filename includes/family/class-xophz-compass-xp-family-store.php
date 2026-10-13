@@ -13,6 +13,9 @@
 
 class Xophz_Compass_Xp_Family_Store {
 
+  /** Seconds to wait for a family's lock (GET_LOCK) before an append gives up. */
+  const LOCK_WAIT = 5;
+
   /** @var wpdb */
   private $db;
 
@@ -348,6 +351,158 @@ class Xophz_Compass_Xp_Family_Store {
       $id,
       self::db_time( $now - 60 )
     ) );
+  }
+
+  // --- the event stream ------------------------------------------------------------------------
+
+  /**
+   * Append checked events (the 'event' rows of Event_Rules::check_event) to a family's stream.
+   *
+   * Runs under the family's named lock (GET_LOCK( 'xp_family_{family_id}', 5 )), so a family's
+   * numbers are committed in order and a reader asking for "after 104" never misses a 104
+   * still being written. An id already stored (or twice in the batch) is a duplicate, never a
+   * second copy. An accepted hero.card also becomes the hero's card when it is newer. An event
+   * that could not be written is in neither list, so the device sends it again.
+   *
+   * @return array|WP_Error [ 'accepted' => ids, 'duplicate' => ids ], or 503 xp_family_busy
+   *                        when the lock could not be taken.
+   */
+  public function append_events( string $family_id, array $events ) {
+    $lock = 'xp_family_' . $family_id;
+    $got  = $this->db->get_var( $this->db->prepare( 'SELECT GET_LOCK(%s, %d)', $lock, self::LOCK_WAIT ) );
+    if ( '1' !== (string) $got ) {
+      return new WP_Error( 'xp_family_busy', 'The family is busy. Send again in a moment.', [ 'status' => 503 ] );
+    }
+
+    $accepted  = [];
+    $duplicate = [];
+
+    try {
+      $stored = array_flip( $this->known_event_ids( array_column( $events, 'event_id' ) ) );
+      $now    = self::db_time( time() );
+
+      foreach ( $events as $e ) {
+        $id = (string) $e['event_id'];
+        if ( isset( $stored[ $id ] ) ) {
+          $duplicate[] = $id;
+          continue;
+        }
+
+        $data = is_array( $e['data'] ) && [] !== $e['data'] ? $e['data'] : new stdClass();
+        $done = $this->db->insert(
+          $this->t( 'xp_family_events' ),
+          [
+            'event_id'    => $id,
+            'family_id'   => $family_id,
+            'hero_id'     => (string) $e['hero_id'],
+            'device_id'   => (string) $e['device_id'],
+            'kind'        => (string) $e['kind'],
+            'scope'       => (string) $e['scope'],
+            'occurred_at' => self::db_time( (int) $e['occurred_at'] ),
+            'received_at' => $now,
+            'data'        => wp_json_encode( $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ),
+          ],
+          [ '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ]
+        );
+        if ( 1 !== (int) $done ) {
+          continue;
+        }
+
+        $stored[ $id ] = true;
+        $accepted[]    = $id;
+
+        if ( 'hero.card' === $e['kind'] && is_array( $e['data'] ) ) {
+          $this->set_card( $family_id, (string) $e['hero_id'], $e['data'], (int) $e['occurred_at'] );
+        }
+      }
+    } finally {
+      $this->db->get_var( $this->db->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+    }
+
+    return [ 'accepted' => $accepted, 'duplicate' => $duplicate ];
+  }
+
+  /**
+   * Which of these event ids are already stored (in any family: ids are unique site-wide).
+   *
+   * @param string[] $ids
+   * @return string[]
+   */
+  public function known_event_ids( array $ids ): array {
+    $ids = array_values( array_unique( array_filter( $ids, 'is_string' ) ) );
+    if ( [] === $ids ) {
+      return [];
+    }
+
+    $marks = implode( ',', array_fill( 0, count( $ids ), '%s' ) );
+    $found = $this->db->get_col(
+      $this->db->prepare( "SELECT event_id FROM {$this->t( 'xp_family_events' )} WHERE event_id IN ({$marks})", $ids )
+    );
+
+    return is_array( $found ) ? array_map( 'strval', $found ) : [];
+  }
+
+  /**
+   * A family's events after a number, oldest first.
+   *
+   * @param string|null $hero_id For a hero key: only what that hero may read (public events and
+   *                             the family events of that hero), so a page is never filled with
+   *                             rows the caller cannot see.
+   */
+  public function events_after( string $family_id, int $since, int $limit, ?string $hero_id = null ): array {
+    $events = $this->t( 'xp_family_events' );
+
+    $sql = null === $hero_id
+      ? $this->db->prepare(
+        "SELECT * FROM {$events} WHERE family_id = %s AND seq > %d ORDER BY seq ASC LIMIT %d",
+        $family_id,
+        max( 0, $since ),
+        max( 1, $limit )
+      )
+      : $this->db->prepare(
+        "SELECT * FROM {$events} WHERE family_id = %s AND seq > %d
+         AND ( scope = 'public' OR ( scope = 'family' AND hero_id = %s ) ) ORDER BY seq ASC LIMIT %d",
+        $family_id,
+        max( 0, $since ),
+        $hero_id,
+        max( 1, $limit )
+      );
+
+    $rows = $this->db->get_results( $sql, ARRAY_A );
+
+    return is_array( $rows ) ? $rows : [];
+  }
+
+  /**
+   * The events a family's devices sent in the last hour (what the server writes itself is not
+   * counted).
+   *
+   * @return array [ 'family' => int, 'by_hero' => [ hero id => int ] ]
+   */
+  public function counts_last_hour( string $family_id, int $now ): array {
+    $server_kinds = [];
+    foreach ( Xophz_Compass_Xp_Family_Event_Rules::KINDS as $kind => $def ) {
+      if ( 'server' === ( $def['writer'] ?? null ) ) {
+        $server_kinds[] = $kind;
+      }
+    }
+    $skip  = [] === $server_kinds ? "''" : implode( ',', array_fill( 0, count( $server_kinds ), '%s' ) );
+    $query = "SELECT hero_id, COUNT(*) AS n FROM {$this->t( 'xp_family_events' )}
+      WHERE family_id = %s AND received_at > %s AND kind NOT IN ({$skip}) GROUP BY hero_id";
+
+    $rows = $this->db->get_results(
+      $this->db->prepare( $query, array_merge( [ $family_id, self::db_time( $now - 3600 ) ], $server_kinds ) ),
+      ARRAY_A
+    );
+
+    $by_hero = [];
+    $family  = 0;
+    foreach ( is_array( $rows ) ? $rows : [] as $row ) {
+      $by_hero[ (string) $row['hero_id'] ] = (int) $row['n'];
+      $family                             += (int) $row['n'];
+    }
+
+    return [ 'family' => $family, 'by_hero' => $by_hero ];
   }
 
   /** A family table's full name on this site. */

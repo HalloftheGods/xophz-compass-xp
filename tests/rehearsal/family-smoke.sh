@@ -497,15 +497,188 @@ section_phones() {
   ok "the code still works once the counter is gone (a 429 used nothing)" '.status == 200 and .body.hero_id == "h-2"'
 }
 
+# --- events: the append-only stream, limits, rewards from the server -------------------------
+
+uuid() { cat /proc/sys/kernel/random/uuid; }
+
+iso_at() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# event <id> <hero> <device> <kind> <data json> [at]: one wire event.
+event() {
+  jq -nc --arg id "$1" --arg hero "$2" --arg dev "$3" --arg kind "$4" --argjson data "$5" \
+    --arg at "${6:-$(iso_at "$(date +%s)")}" \
+    '{ id: $id, hero_id: $hero, device_id: $dev, kind: $kind, at: $at, data: $data }'
+}
+
+# batch <event>...: the body of POST /events.
+batch() { printf '%s\n' "$@" | jq -sc '{ events: . }'; }
+
+# quests <n> <hero> <device>: the body of POST /events with n quest.done events.
+quests() {
+  local i
+  for i in $(seq 1 "$1"); do uuid; done | jq -Rsc --arg hero "$2" --arg dev "$3" --arg at "$(iso_at "$(date +%s)")" \
+    '{ events: (split("\n") | map(select(length > 0)) | map({ id: ., hero_id: $hero, device_id: $dev, kind: "quest.done", at: $at, data: { difficulty: 1, xp: 10, fight: false } })) }'
+}
+
+# link_phone <hero> <device id>: a hero key for a new phone of that hero; sets KEY.
+link_phone() {
+  make_code "$1"
+  claim "$CODE" "$2" "Smoke phone of $1"
+}
+
+section_events() {
+  printf -- '-- events\n'
+  reset_family || return 0
+
+  link_phone h-1 "$PHONE1"
+  local key1="$KEY"
+  link_phone h-2 "$PHONE2"
+  local key2="$KEY"
+
+  local look='{"skin":"tan","hair":"bob","hairColor":"red","outfit":"tunic","secret":"x"}'
+  local card_id
+  card_id="$(uuid)"
+  local card
+  card="$(event "$card_id" h-1 "$D1" hero.card "{\"nickname\":\"Mia\",\"look\":$look,\"jobClass\":\"knight\",\"level\":3,\"birthday\":\"2015-04-01\"}")"
+
+  req none POST /events "$(batch "$card")"
+  ok "no auth POST /events -> 401" '.status == 401'
+
+  req "$PARENT_AUTH" POST /events "$(batch "$card")"
+  ok "a hero.card with an extra birthday -> accepted" ".status == 200 and .body.accepted == [\"$card_id\"] and .body.duplicate == [] and .body.rejected == []"
+
+  req "$PARENT_AUTH" GET /family
+  ok "GET /family shows the card without birthday or secret" \
+    '.status == 200 and (.body.heroes[] | select(.hero_id == "h-1") | .card | (.nickname == "Mia" and .level == 3 and .jobClass == "knight" and .look.hair == "bob" and (has("birthday") | not) and (.look | has("secret") | not) and (.updated_at | fromdateiso8601) > 0))'
+  req "key:$key2" GET /family
+  ok "a sibling's phone sees the card" '.status == 200 and (.body.heroes[] | select(.hero_id == "h-1") | .card.nickname) == "Mia"'
+
+  req "$PARENT_AUTH" POST /events "$(batch "$card")"
+  ok "the same id again -> duplicate" ".status == 200 and .body.accepted == [] and .body.duplicate == [\"$card_id\"]"
+
+  req "$PARENT_AUTH" GET "/events?since=0"
+  ok "GET /events?since=0 has the card once, without birthday" \
+    ".status == 200 and ([.body[] | select(.id == \"$card_id\")] | length) == 1 and (.body[] | select(.id == \"$card_id\") | (.kind == \"hero.card\" and .scope == \"public\" and .hero_id == \"h-1\" and .device_id == \"$D1\" and (.data | has(\"birthday\") | not) and (.at | fromdateiso8601) > 0 and (.received_at | fromdateiso8601) > 0 and (.seq | type) == \"number\"))"
+
+  # An older card never replaces a newer one.
+  local old_card
+  old_card="$(event "$(uuid)" h-1 "$D1" hero.card '{"nickname":"Old Mia","look":{"skin":"tan"},"jobClass":"knight","level":1}' "$(iso_at $(($(date +%s) - 86400)))")"
+  req "$PARENT_AUTH" POST /events "$(batch "$old_card")"
+  req "$PARENT_AUTH" GET /family
+  ok "an older hero.card is stored but does not replace the card" '(.body.heroes[] | select(.hero_id == "h-1") | .card.nickname) == "Mia"'
+
+  # Review focus 1: a refused event never sinks the rest of its batch.
+  local good_id reward_id ghost_id future_id unknown_id empty_id
+  good_id="$(uuid)"
+  reward_id="$(uuid)"
+  ghost_id="$(uuid)"
+  future_id="$(uuid)"
+  unknown_id="$(uuid)"
+  empty_id="$(uuid)"
+  req "$PARENT_AUTH" POST /events "$(batch \
+    "$(event "$good_id" h-2 "$D1" quest.done '{"difficulty":2,"xp":"40","fight":true,"name":"take your medicine"}')" \
+    "$(event "$reward_id" h-2 "$D1" reward.granted '{"xp":500,"ap":5,"reason":"cheat","sourceId":"me"}')" \
+    "$(event "$ghost_id" h-9 "$D1" quest.done '{"difficulty":1,"xp":1,"fight":false}')" \
+    "$(event "$future_id" h-2 "$D1" quest.done '{"difficulty":1,"xp":1,"fight":false}' "$(iso_at $(($(date +%s) + 90000)))")" \
+    "$(event "$unknown_id" h-2 "$D1" hero.secret '{"x":1}')" \
+    "$(event "$empty_id" h-2 "$D1" hero.leveled '{"level":"high"}')" \
+    '{"id":"abc","hero_id":"h-2","device_id":"SmokeHomeDevice1","kind":"quest.done","at":"2026-01-01T00:00:00Z","data":{}}')"
+  ok "a reward.granted from the parent -> rejected, the rest of the batch kept" \
+    ".status == 200 and (.body.accepted | sort) == ([\"$good_id\",\"$empty_id\"] | sort) and ([.body.rejected[] | select(.id == \"$reward_id\" and .code == \"xp_family_event_invalid\")] | length) == 1"
+  ok "a hero not in the family, a time a day ahead, an unknown kind and a bad id -> rejected" \
+    "([.body.rejected[] | select(.code == \"xp_family_event_invalid\") | .id] | sort) == ([\"$reward_id\",\"$ghost_id\",\"$future_id\",\"$unknown_id\",\"abc\"] | sort)"
+  req "$PARENT_AUTH" GET "/events?since=0"
+  ok "a quest.done keeps only difficulty and fight (xp as a string is dropped, no name)" \
+    "(.body[] | select(.id == \"$good_id\") | .data) == {\"difficulty\":2,\"fight\":true}"
+  ok "an event whose data filters to nothing has data {} (an object)" \
+    "(.body[] | select(.id == \"$empty_id\") | .data) == {}"
+  ok "no rejected event was stored" \
+    "([.body[] | select(.id == \"$reward_id\" or .id == \"$ghost_id\" or .id == \"$future_id\" or .id == \"$unknown_id\")] | length) == 0"
+
+  # A hero key may write none of this base's kinds: not for itself, not for a sibling, no reward.
+  local own_id sib_id key_reward_id
+  own_id="$(uuid)"
+  sib_id="$(uuid)"
+  key_reward_id="$(uuid)"
+  req "key:$key1" POST /events "$(batch \
+    "$(event "$own_id" h-1 "$PHONE1" quest.done '{"difficulty":1,"xp":5,"fight":false}')" \
+    "$(event "$sib_id" h-2 "$PHONE1" hero.card '{"nickname":"Hacked","look":{"skin":"tan"},"jobClass":"x","level":99}')" \
+    "$(event "$key_reward_id" h-1 "$PHONE1" reward.granted '{"xp":9999,"ap":99,"reason":"x","sourceId":"x"}')")"
+  ok "a hero key's events (its own, a sibling's, a reward.granted) -> all rejected" \
+    ".status == 200 and .body.accepted == [] and ([.body.rejected[] | .id] | sort) == ([\"$own_id\",\"$sib_id\",\"$key_reward_id\"] | sort)"
+  req "$PARENT_AUTH" GET /family
+  ok "the sibling's card is untouched" '(.body.heroes[] | select(.hero_id == "h-2") | .card) == null'
+
+  # Rewards come only from the server.
+  local granted
+  granted="$(wp eval "\$r = Xophz_Compass_Xp_Family_Events::grant_reward( '$F1', 'h-1', 25, 2, 'party-bonus', 'smoke-1' ); echo is_wp_error( \$r ) ? 'error: ' . \$r->get_error_message() : wp_json_encode( \$r );" 2>&1 | tail -n 1)"
+  local grant_id
+  grant_id="$(jq -r '.id // empty' <<< "$granted" 2> /dev/null)"
+  if [ -n "$grant_id" ]; then pass "grant_reward through wp eval"; else fail "grant_reward through wp eval" "$granted"; fi
+  local missing
+  missing="$(wp eval "\$r = Xophz_Compass_Xp_Family_Events::grant_reward( '$F1', 'h-9', 25, 2, 'party-bonus', 'smoke-2' ); echo is_wp_error( \$r ) ? \$r->get_error_code() : 'granted';" 2>&1 | tail -n 1)"
+  if [ "$missing" = xp_family_event_invalid ]; then pass "grant_reward for a hero not in the family -> refused"; else fail "grant_reward for a hero not in the family -> refused" "$missing"; fi
+
+  req "key:$key1" GET "/events?since=0"
+  ok "h-1's phone reads its reward" \
+    "(.body[] | select(.id == \"$grant_id\") | (.kind == \"reward.granted\" and .scope == \"family\" and .device_id == \"server\" and .data == {\"xp\":25,\"ap\":2,\"reason\":\"party-bonus\",\"sourceId\":\"smoke-1\"}))"
+  ok "h-1's phone reads the public events too" "([.body[] | select(.id == \"$card_id\" or .id == \"$good_id\")] | length) == 2"
+  req "key:$key2" GET "/events?since=0"
+  ok "h-2's phone does not read h-1's reward" ".status == 200 and ([.body[] | select(.id == \"$grant_id\")] | length) == 0 and ([.body[] | select(.id == \"$card_id\")] | length) == 1"
+  req "$PARENT_AUTH" GET "/events?since=0"
+  ok "the parent reads it" "([.body[] | select(.id == \"$grant_id\")] | length) == 1"
+
+  # Reading by number: oldest first, after since, at most limit.
+  local first_seq
+  first_seq="$(jq -r '.[0].seq // 0' "$TMP/body" 2> /dev/null || echo 0)"
+  ok "events come oldest first" '[.body[] | .seq] == ([.body[] | .seq] | sort)'
+  req "$PARENT_AUTH" GET "/events?since=0&limit=1"
+  ok "limit=1 -> one event" ".status == 200 and (.body | length) == 1 and .body[0].seq == $first_seq"
+  req "$PARENT_AUTH" GET "/events?since=$first_seq"
+  ok "since=<the first number> -> the events after it" ".status == 200 and ([.body[] | select(.seq <= $first_seq)] | length) == 0 and (.body | length) > 0"
+
+  # Batches and limits.
+  req "$PARENT_AUTH" POST /events "$(quests 51 h-3 "$D1")"
+  ok "51 events -> 400 xp_family_bad_request" '.status == 400 and .body.code == "xp_family_bad_request"'
+
+  local sent=0 part
+  for part in 50 50 20; do
+    req "$PARENT_AUTH" POST /events "$(quests "$part" h-3 "$D1")"
+    if [ "$STATUS" = 200 ]; then sent=$((sent + $(jq '.accepted | length' "$TMP/body"))); fi
+  done
+  if [ "$sent" = 120 ]; then pass "120 events for h-3 in three requests -> accepted"; else fail "120 events for h-3 in three requests -> accepted" "$sent accepted"; fi
+  req "$PARENT_AUTH" POST /events "$(quests 1 h-3 "$D1")"
+  ok "one more for h-3 -> 429 with Retry-After: 600" '.status == 429 and .body.code == "xp_family_rate_limited" and .retry_after == "600"'
+  req "$PARENT_AUTH" POST /events "$(quests 1 h-2 "$D1")"
+  ok "h-2 can still send" '.status == 200 and (.body.accepted | length) == 1'
+
+  # Moving home: the old home's next send gets 409 for the whole batch.
+  req "$PARENT_AUTH" POST /family/move "{\"family_id\":\"$F1\",\"device_id\":\"$D2\"}"
+  req "$PARENT_AUTH" POST /events "$(quests 1 h-2 "$D1")"
+  ok "after moving home to D2, a send from D1 -> 409 xp_family_moved" '.status == 409 and .body.code == "xp_family_moved"'
+  req "$PARENT_AUTH" POST /events "$(quests 1 h-2 "$D2")"
+  ok "a send from D2 -> accepted" '.status == 200 and (.body.accepted | length) == 1'
+
+  # Kept 90 days, counted from when the site received an event.
+  sql "UPDATE ${PREFIX}xp_family_events SET received_at = UTC_TIMESTAMP() - INTERVAL 91 DAY
+    WHERE family_id = '$F1' AND event_id = '$good_id';" > /dev/null
+  wp eval 'do_action( "xp_family_cleanup" );' > /dev/null 2>&1
+  req "$PARENT_AUTH" GET "/events?since=0&limit=200"
+  ok "an event received 91 days ago is gone after xp_family_cleanup" \
+    ".status == 200 and ([.body[] | select(.id == \"$good_id\")] | length) == 0 and ([.body[] | select(.id == \"$card_id\")] | length) == 1"
+}
+
 # --- run -------------------------------------------------------------------------------------
 setup
 
 case "$SECTION" in
   family) section_family ;;
   phones) section_phones ;;
+  events) section_events ;;
   all)
     section_family
     section_phones
+    section_events
     ;;
 esac
 

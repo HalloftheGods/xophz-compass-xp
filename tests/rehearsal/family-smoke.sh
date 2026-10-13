@@ -332,13 +332,180 @@ section_family() {
   ok "F1 from D1 is now home-elsewhere" ".status == 200 and .body.answer == \"home-elsewhere\""
 }
 
+# --- phones: link codes, claiming, hero keys, the phone list ---------------------------------
+
+# make_code <hero id>: a new link code from the parent; sets CODE.
+make_code() {
+  req "$PARENT_AUTH" POST "/heroes/$1/link-codes"
+  CODE="$(field .code)"
+}
+
+# claim <typed code> <device id> <label>: sets KEY (empty when the claim failed).
+claim() {
+  req none POST /devices/claim "{\"code\":\"$1\",\"device_id\":\"$2\",\"label\":\"$3\"}"
+  KEY="$(field .key)"
+}
+
+# The id of the parent's listed phone with this label (empty when it is not listed).
+phone_id() {
+  req "$PARENT_AUTH" GET /devices
+  jq -r --arg label "$1" '[.[] | select(.label == $label) | .id] | first // empty' "$TMP/body" 2> /dev/null
+}
+
+section_phones() {
+  printf -- '-- phones\n'
+  reset_family || return 0
+
+  req none POST /heroes/h-1/link-codes
+  ok "no auth makes a link code -> 401" '.status == 401'
+
+  req "$PARENT_AUTH" POST /heroes/h-9/link-codes
+  ok "a link code for a hero not in the family -> 404 xp_family_unknown_hero" '.status == 404 and .body.code == "xp_family_unknown_hero"'
+
+  make_code h-1
+  ok "a link code for h-1: 8 alphabet characters" '.status == 200 and (.body.code | test("^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$"))'
+  ok "the code expires about 10 minutes ahead" '(.body.expires_at | fromdateiso8601) - now | (. > 540 and . < 660)'
+
+  claim "${CODE:0:4}-${CODE:4:4}" "$PHONE1" "Smoke phone one"
+  ok "claim with ABCD-EFGH formatting -> a hero key" \
+    ".status == 200 and (.body.key | test(\"^xph_[A-Za-z0-9_-]{43}$\")) and .body.family_id == \"$F1\" and .body.hero_id == \"h-1\" and (.body | has(\"card\"))"
+  local key1="$KEY"
+
+  claim "$CODE" "$PHONE2" "Smoke phone again"
+  ok "the same code again -> 404 xp_family_code_invalid" '.status == 404 and .body.code == "xp_family_code_invalid"'
+
+  make_code h-2
+  local expired="$CODE"
+  sql "UPDATE ${PREFIX}xp_family_link_codes SET expires_at = '2000-01-01 00:00:00'
+    WHERE family_id = '$F1' AND code_hash = SHA2('$expired', 256);" > /dev/null
+  claim "$expired" "$PHONE2" "Smoke phone expired"
+  ok "an expired code -> 404 xp_family_code_invalid" '.status == 404 and .body.code == "xp_family_code_invalid"'
+
+  make_code h-2
+  local first="$CODE"
+  make_code h-2
+  local second="$CODE"
+  claim "$first" "$PHONE2" "Smoke phone replaced"
+  ok "a second code for a hero makes the first fail -> 404" '.status == 404 and .body.code == "xp_family_code_invalid"'
+  claim "$(printf '%s %s' "${second:0:4}" "${second:4:4}" | tr '[:upper:]' '[:lower:]')" "$PHONE2" ""
+  ok "the second code, typed as abcd efgh -> a key for h-2" '.status == 200 and .body.hero_id == "h-2" and (.body.key | startswith("xph_"))'
+  local key2="$KEY"
+
+  req none POST /devices/claim "{\"code\":\"$second\",\"device_id\":\"not a device\",\"label\":\"x\"}"
+  ok "a claim with a bad device id -> 400 xp_family_bad_request" '.status == 400 and .body.code == "xp_family_bad_request"'
+
+  req "key:$key1" GET /family
+  ok "the key reads the family -> 200 with no age groups" \
+    ".status == 200 and .body.family_id == \"$F1\" and (.body.heroes | length) == 3 and ([.body.heroes[] | has(\"age_group\")] | any | not)"
+
+  req "key:$key1" POST /heroes/h-1/link-codes
+  ok "the key makes a link code -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  req "key:$key1" POST /heroes/h-1 '{"nickname":"Hacked","age_group":"adult"}'
+  ok "the key saves a hero -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  req "key:$key1" DELETE /heroes/h-2
+  ok "the key removes a hero -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  req "key:$key1" POST /family "{\"family_id\":\"$F1\",\"device_id\":\"$PHONE1\"}"
+  ok "the key binds the family -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  req "key:$key1" POST /family/move "{\"family_id\":\"$F1\",\"device_id\":\"$PHONE1\"}"
+  ok "the key moves home -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  req "key:$key1" GET /devices
+  ok "the key lists the phones -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+  make_code h-3
+  req "key:$key1" POST /devices/claim "{\"code\":\"$CODE\",\"device_id\":\"$PHONE3\",\"label\":\"x\"}"
+  ok "the key claims a code -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+
+  req "key:xph_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" GET /family
+  ok "an unknown key -> 401 xp_family_key_revoked" '.status == 401 and .body.code == "xp_family_key_revoked"'
+  req "key:not-a-key" GET /family
+  ok "a key of the wrong shape -> 401 xp_family_key_revoked" '.status == 401 and .body.code == "xp_family_key_revoked"'
+
+  req "$PARENT_AUTH" GET /devices
+  ok "GET /devices lists both phones" \
+    '.status == 200 and ([.body[] | select(.label == "Smoke phone one" and .hero_id == "h-1")] | length) == 1 and ([.body[] | select(.hero_id == "h-2" and .label == "A hero phone")] | length) == 1'
+  ok "a phone that called has last_seen_at" \
+    '([.body[] | select(.label == "Smoke phone one") | .last_seen_at | strings | fromdateiso8601] | length) == 1 and ([.body[] | .created_at | fromdateiso8601] | length) == 2'
+
+  local id1 id2
+  id1="$(phone_id "Smoke phone one")"
+  id2="$(phone_id "A hero phone")"
+
+  req "key:$key1" DELETE "/devices/$id2"
+  ok "a key unlinks another hero's phone -> 403 xp_family_forbidden" '.status == 403 and .body.code == "xp_family_forbidden"'
+
+  # Another account's family cannot unlink or list this family's phones.
+  req "$PARENT2_AUTH" POST /family "{\"family_id\":\"$F2\",\"device_id\":\"$D2\"}"
+  req "$PARENT2_AUTH" DELETE "/devices/$id1"
+  req "$PARENT2_AUTH" GET /devices
+  ok "another family's parent lists none of these phones" '.status == 200 and (.body | map(select(.hero_id == "h-1" or .hero_id == "h-2")) | length) == 0'
+  req "key:$key1" GET /family
+  ok "another family's parent cannot unlink this phone" '.status == 200'
+
+  req "$PARENT_AUTH" DELETE "/devices/$id1"
+  ok "the parent unlinks h-1's phone -> ok" '.status == 200 and .body.ok == true'
+  req "key:$key1" GET /family
+  ok "the unlinked key -> 401 xp_family_key_revoked" '.status == 401 and .body.code == "xp_family_key_revoked"'
+  req "$PARENT_AUTH" GET /devices
+  ok "the unlinked phone is off the list" ".status == 200 and ([.body[] | select(.id == ${id1:-0})] | length) == 0"
+
+  # A hero key unlinks its own phone.
+  req "key:$key2" DELETE "/devices/$id2"
+  ok "a key unlinks its own phone -> ok" '.status == 200 and .body.ok == true'
+  req "key:$key2" GET /family
+  ok "that key -> 401 xp_family_key_revoked" '.status == 401 and .body.code == "xp_family_key_revoked"'
+
+  # Removing a hero revokes every phone of the hero.
+  make_code h-1
+  claim "$CODE" "$PHONE1" "Smoke phone two"
+  local key3="$KEY"
+  make_code h-1
+  claim "$CODE" "$PHONE2" "Smoke phone three"
+  local key4="$KEY"
+  req "key:$key3" GET /family
+  ok "a second phone of h-1 works" '.status == 200'
+  make_code h-1
+  local unused="$CODE"
+  req "$PARENT_AUTH" DELETE /heroes/h-1
+  req "key:$key3" GET /family
+  ok "DELETE /heroes/h-1 revokes its phone" '.status == 401 and .body.code == "xp_family_key_revoked"'
+  req "key:$key4" GET /family
+  ok "DELETE /heroes/h-1 revokes its other phone" '.status == 401 and .body.code == "xp_family_key_revoked"'
+  claim "$unused" "$PHONE3" "Smoke phone late"
+  ok "a code of a removed hero -> 404 xp_family_code_invalid" '.status == 404 and .body.code == "xp_family_code_invalid"'
+
+  # The app on another origin sends the key header and reads Retry-After.
+  STATUS="$(curl -s -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' -X OPTIONS \
+    -H 'Origin: http://localhost:8100' -H 'Access-Control-Request-Method: GET' \
+    -H 'Access-Control-Request-Headers: x-xp-hero-key' "$API/family")"
+  ok "CORS allows the X-XP-Hero-Key header" '.headers | test("access-control-allow-headers:[^\n]*x-xp-hero-key")'
+  ok "CORS exposes Retry-After" '.headers | test("access-control-expose-headers:[^\n]*retry-after")'
+
+  # 10 failed claims per address per hour, then 429 (counted from a clean counter).
+  sql "$(claim_counters_sql)" > /dev/null
+  local i bad=0
+  for i in $(seq 1 10); do
+    claim "ZZZZZZZZ" "$PHONE3" "Smoke guess"
+    [ "$STATUS" = 404 ] && bad=$((bad + 1))
+  done
+  if [ "$bad" = 10 ]; then pass "10 wrong codes -> 404 each"; else fail "10 wrong codes -> 404 each" "$bad of 10"; fi
+  claim "ZZZZZZZZ" "$PHONE3" "Smoke guess"
+  ok "the 11th claim -> 429 xp_family_rate_limited" '.status == 429 and .body.code == "xp_family_rate_limited" and (.retry_after | tonumber) > 0'
+  make_code h-2
+  claim "$CODE" "$PHONE3" "Smoke right code"
+  ok "even a right code is refused while limited -> 429" '.status == 429'
+  sql "$(claim_counters_sql)" > /dev/null
+  claim "$CODE" "$PHONE3" "Smoke right code"
+  ok "the code still works once the counter is gone (a 429 used nothing)" '.status == 200 and .body.hero_id == "h-2"'
+}
+
 # --- run -------------------------------------------------------------------------------------
 setup
 
 case "$SECTION" in
   family) section_family ;;
+  phones) section_phones ;;
   all)
     section_family
+    section_phones
     ;;
 esac
 

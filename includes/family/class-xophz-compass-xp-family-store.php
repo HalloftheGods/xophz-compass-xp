@@ -215,6 +215,141 @@ class Xophz_Compass_Xp_Family_Store {
     ) );
   }
 
+  // --- link codes ------------------------------------------------------------------------------
+
+  /**
+   * Keep a new link code (its hash only). The hero's unused codes are deleted first, so a new
+   * code replaces the old one.
+   *
+   * @return bool False when the hash is already stored (the caller makes another code).
+   */
+  public function put_code( string $code_hash, string $family_id, string $hero_id, int $user_id, int $expires_at ): bool {
+    $codes = $this->t( 'xp_family_link_codes' );
+
+    $this->db->query( $this->db->prepare(
+      "DELETE FROM {$codes} WHERE family_id = %s AND hero_id = %s AND used_at IS NULL",
+      $family_id,
+      $hero_id
+    ) );
+
+    $done = $this->db->query( $this->db->prepare(
+      "INSERT IGNORE INTO {$codes} (code_hash, family_id, hero_id, created_by, expires_at) VALUES (%s, %s, %s, %d, %s)",
+      $code_hash,
+      $family_id,
+      $hero_id,
+      $user_id,
+      self::db_time( $expires_at )
+    ) );
+
+    return 1 === (int) $done;
+  }
+
+  /**
+   * Use a link code once: one UPDATE marks it used only while it is unused and unexpired, so
+   * two claims at the same moment cannot both win. The row is read only when this call won.
+   *
+   * @return array|null The code row, or null when it is unknown, used or expired.
+   */
+  public function take_code( string $code_hash, int $now ): ?array {
+    $codes = $this->t( 'xp_family_link_codes' );
+    $at    = self::db_time( $now );
+
+    $changed = $this->db->query( $this->db->prepare(
+      "UPDATE {$codes} SET used_at = %s WHERE code_hash = %s AND used_at IS NULL AND expires_at > %s",
+      $at,
+      $code_hash,
+      $at
+    ) );
+    if ( 1 !== (int) $changed ) {
+      return null;
+    }
+
+    $row = $this->db->get_row( $this->db->prepare( "SELECT * FROM {$codes} WHERE code_hash = %s", $code_hash ), ARRAY_A );
+
+    return is_array( $row ) ? $row : null;
+  }
+
+  // --- hero phones -----------------------------------------------------------------------------
+
+  /**
+   * Link a hero phone; only the hash of its key is kept.
+   *
+   * @return int The phone's id, 0 when the row could not be written.
+   */
+  public function add_device( string $family_id, string $hero_id, string $device_id, string $label, string $key_hash ): int {
+    $done = $this->db->query( $this->db->prepare(
+      "INSERT INTO {$this->t( 'xp_family_devices' )} (family_id, hero_id, device_id, label, key_hash, created_at)
+       VALUES (%s, %s, %s, %s, %s, %s)",
+      $family_id,
+      $hero_id,
+      $device_id,
+      $label,
+      $key_hash,
+      self::db_time( time() )
+    ) );
+
+    return 1 === (int) $done ? (int) $this->db->insert_id : 0;
+  }
+
+  /**
+   * The linked phone of a key's hash: not revoked, and its hero not removed.
+   *
+   * @return array|null The phone row, or null.
+   */
+  public function device_by_key_hash( string $hash ): ?array {
+    $row = $this->db->get_row(
+      $this->db->prepare(
+        "SELECT d.* FROM {$this->t( 'xp_family_devices' )} d
+         JOIN {$this->t( 'xp_family_heroes' )} h ON h.family_id = d.family_id AND h.hero_id = d.hero_id
+         JOIN {$this->t( 'xp_families' )} f ON f.family_id = d.family_id
+         WHERE d.key_hash = %s AND d.revoked_at IS NULL AND h.removed_at IS NULL",
+        $hash
+      ),
+      ARRAY_A
+    );
+
+    return is_array( $row ) ? $row : null;
+  }
+
+  /** The family's linked phones (not revoked), oldest first. */
+  public function devices( string $family_id ): array {
+    $rows = $this->db->get_results(
+      $this->db->prepare(
+        "SELECT * FROM {$this->t( 'xp_family_devices' )} WHERE family_id = %s AND revoked_at IS NULL ORDER BY id",
+        $family_id
+      ),
+      ARRAY_A
+    );
+
+    return is_array( $rows ) ? $rows : [];
+  }
+
+  /**
+   * Unlink a phone of this family. A phone of another family is never touched.
+   *
+   * @return bool Whether a linked phone was revoked now.
+   */
+  public function revoke_device( string $family_id, int $id ): bool {
+    $done = $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_devices' )} SET revoked_at = %s WHERE id = %d AND family_id = %s AND revoked_at IS NULL",
+      self::db_time( time() ),
+      $id,
+      $family_id
+    ) );
+
+    return 1 === (int) $done;
+  }
+
+  /** Note that a phone called, at most once a minute. */
+  public function touch_device( int $id, int $now ): void {
+    $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_devices' )} SET last_seen_at = %s WHERE id = %d AND ( last_seen_at IS NULL OR last_seen_at <= %s )",
+      self::db_time( $now ),
+      $id,
+      self::db_time( $now - 60 )
+    ) );
+  }
+
   /** A family table's full name on this site. */
   private function t( string $name ): string {
     return $this->db->prefix . $name;

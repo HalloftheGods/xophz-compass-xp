@@ -17,6 +17,16 @@ class Xophz_Compass_Xp_Family_Rest {
 
   const NAMESPACE = 'xp-family/v1';
 
+  /** The header a kid phone sends its hero key in. */
+  const KEY_HEADER = 'X-XP-Hero-Key';
+
+  /** Transient name prefix of the failed-claim counter of one address. */
+  const CLAIM_FAIL_PREFIX = 'xp_family_claim_fail_';
+  const CLAIM_FAIL_WINDOW = 3600;
+
+  /** Seconds between two last_seen_at updates of one phone. */
+  const TOUCH_EVERY = 60;
+
   private $plugin_name;
   private $version;
 
@@ -25,6 +35,11 @@ class Xophz_Compass_Xp_Family_Rest {
 
   public $action_hooks = [
     'rest_api_init' => 'register_routes',
+  ];
+
+  public $filter_hooks = [
+    'rest_allowed_cors_headers' => 'allow_cors_headers',
+    'rest_exposed_cors_headers' => 'expose_cors_headers',
   ];
 
   public function __construct( $plugin_name, $version, $store = null ) {
@@ -62,6 +77,48 @@ class Xophz_Compass_Xp_Family_Rest {
       [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'save_hero' ], 'permission_callback' => '__return_true' ],
       [ 'methods' => WP_REST_Server::DELETABLE, 'callback' => [ $this, 'remove_hero' ], 'permission_callback' => '__return_true' ],
     ] );
+
+    register_rest_route( self::NAMESPACE, '/heroes/' . $hero . '/link-codes', [
+      [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'make_code' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/devices/claim', [
+      [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'claim' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/devices', [
+      [ 'methods' => WP_REST_Server::READABLE, 'callback' => [ $this, 'list_devices' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/devices/(?P<id>\d+)', [
+      [ 'methods' => WP_REST_Server::DELETABLE, 'callback' => [ $this, 'unlink_device' ], 'permission_callback' => '__return_true' ],
+    ] );
+  }
+
+  /**
+   * CORS: the app on another origin sends the hero key header. Only on a family site.
+   *
+   * @param mixed $headers The allowed request headers.
+   */
+  public function allow_cors_headers( $headers ) {
+    if ( is_array( $headers ) && Xophz_Compass_Xp_Family_Schema::is_family_site() && ! in_array( self::KEY_HEADER, $headers, true ) ) {
+      $headers[] = self::KEY_HEADER;
+    }
+
+    return $headers;
+  }
+
+  /**
+   * CORS: the app reads Retry-After from a 429. Only on a family site.
+   *
+   * @param mixed $headers The response headers a script may read.
+   */
+  public function expose_cors_headers( $headers ) {
+    if ( is_array( $headers ) && Xophz_Compass_Xp_Family_Schema::is_family_site() && ! in_array( 'Retry-After', $headers, true ) ) {
+      $headers[] = 'Retry-After';
+    }
+
+    return $headers;
   }
 
   // --- who is calling --------------------------------------------------------------------------
@@ -69,12 +126,35 @@ class Xophz_Compass_Xp_Family_Rest {
   /**
    * Who is calling.
    *
-   * A signed-in WordPress user who is a member of this site is a parent; a signed-in user who
-   * is not a member gets xp_family_not_member. Nobody signed in is none.
+   * A request with a hero key (X-XP-Hero-Key) is that phone's hero, whatever else it carries:
+   * the key is hashed and looked up among the linked phones; an unknown or revoked key gets
+   * 401 xp_family_key_revoked. Otherwise a signed-in WordPress user who is a member of this
+   * site is a parent, and a signed-in user who is not a member gets xp_family_not_member.
+   * Nobody signed in is none.
    *
-   * @return array|WP_Error [ 'kind' => 'parent', 'user_id' => int ] or [ 'kind' => 'none' ].
+   * @return array|WP_Error [ 'kind' => 'parent', 'user_id' => int ], [ 'kind' => 'hero',
+   *                        'device' => array ] or [ 'kind' => 'none' ].
    */
   public function caller( WP_REST_Request $r ) {
+    $key = $r->get_header( self::KEY_HEADER );
+    if ( is_string( $key ) && '' !== trim( $key ) ) {
+      $key    = trim( $key );
+      $device = Xophz_Compass_Xp_Family_Rules::is_key_shaped( $key )
+        ? $this->store()->device_by_key_hash( Xophz_Compass_Xp_Family_Rules::hash_secret( $key ) )
+        : null;
+      if ( null === $device ) {
+        return self::error( 'xp_family_key_revoked', 'This phone was unlinked. Ask your Game Master to link it again.', 401 );
+      }
+
+      $now  = time();
+      $seen = Xophz_Compass_Xp_Family_Store::unix( $device['last_seen_at'] ?? null );
+      if ( null === $seen || $seen <= $now - self::TOUCH_EVERY ) {
+        $this->store()->touch_device( (int) $device['id'], $now );
+      }
+
+      return [ 'kind' => 'hero', 'device' => $device ];
+    }
+
     $user_id = (int) get_current_user_id();
     if ( $user_id > 0 ) {
       if ( ! is_user_member_of_blog( $user_id, get_current_blog_id() ) ) {
@@ -110,12 +190,17 @@ class Xophz_Compass_Xp_Family_Rest {
   }
 
   /**
-   * The caller's family: the one a parent owns.
+   * The caller's family: the one a parent owns, or the family of a hero key's phone.
    *
    * @return array|WP_Error The family row, or 404 xp_family_no_family.
    */
   private function family_for( array $caller ) {
-    $family = 'parent' === $caller['kind'] ? $this->store()->family_of_user( (int) $caller['user_id'] ) : null;
+    $family = null;
+    if ( 'parent' === $caller['kind'] ) {
+      $family = $this->store()->family_of_user( (int) $caller['user_id'] );
+    } elseif ( 'hero' === $caller['kind'] ) {
+      $family = $this->store()->family( (string) $caller['device']['family_id'] );
+    }
 
     return null === $family
       ? self::error( 'xp_family_no_family', 'This account has no family on the site yet.', 404 )
@@ -263,7 +348,209 @@ class Xophz_Compass_Xp_Family_Rest {
     return [ 'ok' => true ];
   }
 
+  // --- kid phones ------------------------------------------------------------------------------
+
+  /** POST /heroes/{hero_id}/link-codes -> { code, expires_at } */
+  public function make_code( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'make_code' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $hero_id = self::text( $r->get_param( 'hero_id' ) );
+    if ( ! Xophz_Compass_Xp_Family_Rules::is_hero_id( $hero_id ) || null === $this->store()->hero( (string) $family['family_id'], $hero_id ) ) {
+      return self::error( 'xp_family_unknown_hero', 'That hero is not in this family.', 404 );
+    }
+
+    $expires_at = time() + Xophz_Compass_Xp_Family_Rules::CODE_TTL;
+    for ( $try = 0; $try < 3; $try++ ) {
+      $code = Xophz_Compass_Xp_Family_Rules::new_code();
+      $kept = $this->store()->put_code(
+        Xophz_Compass_Xp_Family_Rules::hash_secret( $code ),
+        (string) $family['family_id'],
+        $hero_id,
+        (int) $caller['user_id'],
+        $expires_at
+      );
+      if ( $kept ) {
+        return [ 'code' => $code, 'expires_at' => gmdate( 'Y-m-d\TH:i:s\Z', $expires_at ) ];
+      }
+    }
+
+    return self::error( 'xp_family_server', 'Could not make a link code. Try again.', 500 );
+  }
+
+  /**
+   * POST /devices/claim { code, device_id, label } -> { key, family_id, hero_id, card }
+   *
+   * Anyone may ask. A wrong, used or expired code counts against the caller's address; past
+   * 10 in an hour every claim from it gets 429 until the hour is over. The key is shown once:
+   * only its hash is kept.
+   */
+  public function claim( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'claim' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $counter = self::CLAIM_FAIL_PREFIX . md5( self::client_ip( $r ) );
+    $fails   = self::claim_fails( $counter );
+    if ( $fails['n'] >= Xophz_Compass_Xp_Family_Rules::CLAIM_FAILS_PER_HOUR ) {
+      return self::limited( 'Too many wrong codes. Wait a while, then try again.', max( 1, $fails['until'] - time() ) );
+    }
+
+    $device_id = self::text( $r->get_param( 'device_id' ) );
+    if ( ! Xophz_Compass_Xp_Family_Rules::is_device_id( $device_id ) ) {
+      return self::error( 'xp_family_bad_request', 'A device id (16 letters and digits) is needed.', 400 );
+    }
+
+    $code = Xophz_Compass_Xp_Family_Rules::normalize_code( self::text( $r->get_param( 'code' ) ) );
+    $row  = null === $code ? null : $this->store()->take_code( Xophz_Compass_Xp_Family_Rules::hash_secret( $code ), time() );
+    $hero = null === $row ? null : $this->store()->hero( (string) $row['family_id'], (string) $row['hero_id'] );
+    if ( null === $hero ) {
+      self::count_claim_fail( $counter );
+      return self::error( 'xp_family_code_invalid', "That code didn't work. Ask your Game Master for a new one.", 404 );
+    }
+
+    $key = Xophz_Compass_Xp_Family_Rules::new_key();
+    $id  = $this->store()->add_device(
+      (string) $row['family_id'],
+      (string) $row['hero_id'],
+      $device_id,
+      Xophz_Compass_Xp_Family_Rules::device_label( $r->get_param( 'label' ) ),
+      Xophz_Compass_Xp_Family_Rules::hash_secret( $key )
+    );
+    if ( $id < 1 ) {
+      return self::error( 'xp_family_server', 'Could not link this phone. Ask your Game Master for a new code.', 500 );
+    }
+
+    return [
+      'key'       => $key,
+      'family_id' => (string) $row['family_id'],
+      'hero_id'   => (string) $row['hero_id'],
+      'card'      => self::card_wire( $hero ),
+    ];
+  }
+
+  /** GET /devices -> [ { id, hero_id, label, created_at, last_seen_at } ] (linked phones only) */
+  public function list_devices( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'list_devices' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+    if ( 'parent' !== $caller['kind'] ) {
+      return self::error( 'xp_family_forbidden', 'This caller may not do that.', 403 );
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $phones = [];
+    foreach ( $this->store()->devices( (string) $family['family_id'] ) as $row ) {
+      $phones[] = [
+        'id'           => (int) $row['id'],
+        'hero_id'      => (string) $row['hero_id'],
+        'label'        => (string) $row['label'],
+        'created_at'   => Xophz_Compass_Xp_Family_Store::iso( $row['created_at'] ?? null ),
+        'last_seen_at' => Xophz_Compass_Xp_Family_Store::iso( $row['last_seen_at'] ?? null ),
+      ];
+    }
+
+    return $phones;
+  }
+
+  /**
+   * DELETE /devices/{id} -> { ok: true }
+   *
+   * A parent unlinks any phone of their own family (a phone of another family is never
+   * touched, and an already unlinked one answers ok). A hero key unlinks only its own phone.
+   */
+  public function unlink_device( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'unlink_device' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $id = (int) $r->get_param( 'id' );
+
+    if ( 'hero' === $caller['kind'] ) {
+      if ( (int) $caller['device']['id'] !== $id ) {
+        return self::error( 'xp_family_forbidden', 'A hero phone can only unlink itself.', 403 );
+      }
+      $this->store()->revoke_device( (string) $caller['device']['family_id'], $id );
+      return [ 'ok' => true ];
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $this->store()->revoke_device( (string) $family['family_id'], $id );
+
+    return [ 'ok' => true ];
+  }
+
   // --- helpers ---------------------------------------------------------------------------------
+
+  /**
+   * The caller's address: Hookshot_Client_Ip::resolve() when Hookshot is active (it trusts
+   * X-Forwarded-For only from a configured proxy), else REMOTE_ADDR. Behind a proxy without
+   * Hookshot every caller would share one claim counter.
+   */
+  public static function client_ip( WP_REST_Request $r ): string {
+    if ( class_exists( 'Hookshot_Client_Ip' ) ) {
+      $resolved = Hookshot_Client_Ip::resolve( $r );
+      if ( is_string( $resolved ) && '' !== $resolved ) {
+        return $resolved;
+      }
+    }
+
+    return isset( $_SERVER['REMOTE_ADDR'] ) && is_string( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '';
+  }
+
+  /**
+   * The failed claims of one address in its current hour.
+   *
+   * @return array [ 'n' => failures, 'until' => unix end of the hour ]
+   */
+  private static function claim_fails( string $counter ): array {
+    $v = get_transient( $counter );
+    if ( ! is_array( $v ) || (int) ( $v['until'] ?? 0 ) <= time() ) {
+      return [ 'n' => 0, 'until' => 0 ];
+    }
+
+    return [ 'n' => (int) ( $v['n'] ?? 0 ), 'until' => (int) $v['until'] ];
+  }
+
+  /** One more failed claim; the first one starts the hour. */
+  private static function count_claim_fail( string $counter ): void {
+    $v = self::claim_fails( $counter );
+    if ( 0 === $v['n'] ) {
+      $v['until'] = time() + self::CLAIM_FAIL_WINDOW;
+    }
+    $v['n']++;
+
+    set_transient( $counter, $v, max( 1, $v['until'] - time() ) );
+  }
+
+  /** A 429 xp_family_rate_limited with a Retry-After header, in the shape of a WordPress error. */
+  private static function limited( string $message, int $retry_after ): WP_REST_Response {
+    $res = new WP_REST_Response(
+      [ 'code' => 'xp_family_rate_limited', 'message' => $message, 'data' => [ 'status' => 429 ] ],
+      429
+    );
+    $res->header( 'Retry-After', (string) $retry_after );
+
+    return $res;
+  }
 
   /**
    * A hero's card as the wire carries it: the kept hero.card fields and updated_at (the ISO

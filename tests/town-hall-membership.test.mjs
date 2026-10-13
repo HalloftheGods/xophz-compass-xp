@@ -1,10 +1,12 @@
 /**
  * Town Hall membership hook (TH8): a parent who links the game to the site becomes a Contributor.
  * The class loads with no WordPress; the hook methods run against small stubs of the WordPress
- * functions they call.
+ * functions they call. The hook tests send a bare PHP script (no harness stubs) because they need
+ * to control get_current_user_id() and apply_filters(), which the harness stubs fix in place.
  */
 
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, assert, assertNoEmDashes } from '../../xophz-compass/tests/harness/test-framework.mjs';
@@ -33,16 +35,59 @@ function shouldJoin(rows) {
     echo json_encode( $out );`);
 }
 
+/** Run PHP in the u-wordpress container with nothing preloaded and parse its JSON output. */
+function runBarePhpJson(code) {
+  const res = spawnSync('docker', ['exec', '-i', 'u-wordpress', 'php'], {
+    input: `<?php\n${code}`,
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+  if (res.status !== 0) {
+    throw new Error(`PHP execution failed with exit code ${res.status}: ${res.stderr || res.stdout}`);
+  }
+  return JSON.parse(res.stdout.trim());
+}
+
+const NO_APP_ID = Symbol('no app id');
+
 /**
  * Run a hook method against stubbed WordPress functions and report what was asked and what was joined.
- * `blog` is the site the request is on, `site` its home_url, `member` whether the user already belongs.
+ * `blog` is the site the request is on, `site` its home_url, `member` whether the user already belongs,
+ * `allowed` what the xp_town_hall_site_urls filter answers (null keeps the default it was given).
+ * For on_admin_init: `pagenow`, `requestAppId` (NO_APP_ID leaves it out of $_REQUEST) and `userId`
+ * (0 is a logged-out visitor) describe the request; for the other two, `appId` is the record's app id.
  */
-function runHook(method, { multisite = true, appId = APP_ID, site = DOIT, member = false, blog = 5, userId = 42 } = {}) {
-  return runPhpJson(`${TOWN_HALL}
-    $GLOBALS['xp_th'] = [ 'joined' => [], 'member_checks' => [], 'filter' => null ];
+function runHook(method, {
+  multisite = true,
+  appId = APP_ID,
+  requestAppId = APP_ID,
+  pagenow = 'authorize-application.php',
+  site = DOIT,
+  member = false,
+  blog = 5,
+  userId = 42,
+  allowed = null,
+} = {}) {
+  const call = {
+    on_admin_init: '$th->on_admin_init();',
+    on_authenticated: '$th->on_authenticated( new WP_User(), $item );',
+    on_password_created: `$th->on_password_created( ${userId}, $item );`,
+  }[method];
+  const request = requestAppId === NO_APP_ID ? '' : `$_REQUEST['app_id'] = ${lit(requestAppId)};`;
+  return runBarePhpJson(`${TOWN_HALL}
+    $GLOBALS['xp_th'] = [ 'joined' => [], 'member_checks' => [], 'filters' => [] ];
+    $GLOBALS['pagenow'] = ${lit(pagenow)};
+    ${request}
     function is_multisite() { return ${multisite ? 'true' : 'false'}; }
     function home_url() { return ${lit(site)}; }
     function get_current_blog_id() { return ${blog}; }
+    function get_current_user_id() { return ${userId}; }
+    function sanitize_text_field( $s ) { return strip_tags( trim( (string) $s ) ); }
+    function wp_unslash( $v ) { return $v; }
+    function apply_filters( $tag, $value ) {
+      $GLOBALS['xp_th']['filters'][] = $tag;
+      return ${allowed === null ? '$value' : lit(allowed)};
+    }
     function is_user_member_of_blog( $user_id, $blog_id ) {
       $GLOBALS['xp_th']['member_checks'][] = [ $user_id, $blog_id ];
       return ${member ? 'true' : 'false'};
@@ -54,18 +99,19 @@ function runHook(method, { multisite = true, appId = APP_ID, site = DOIT, member
     class WP_User { public $ID = ${userId}; }
     $th   = new ${CLS}( 'xophz-compass-xp', '1' );
     $item = [ 'app_id' => ${lit(appId)}, 'name' => 'Do It For The XP' ];
-    ${method === 'on_authenticated' ? '$th->on_authenticated( new WP_User(), $item );' : `$th->on_password_created( ${userId}, $item );`}
+    ${call}
     echo json_encode( $GLOBALS['xp_th'] );`);
 }
 
 describe('Town Hall membership: constants and hooks', () => {
-  it('names the app id, the default site and the two hooks the loader registers', () => {
+  it('names the app id, the default site and the three hooks the loader registers', () => {
     const res = runPhpJson(`${TOWN_HALL}
       $th = new ${CLS}( 'xophz-compass-xp', '1' );
       echo json_encode( [ ${CLS}::APP_ID, ${CLS}::DEFAULT_SITE_URLS, $th->action_hooks ] );`);
     assert.strictEqual(res[0], APP_ID);
     assert.deepStrictEqual(res[1], [DOIT]);
     assert.deepStrictEqual(res[2], {
+      admin_init: 'on_admin_init',
       wp_create_application_password: ['on_password_created', 10, 2],
       application_password_did_authenticate: ['on_authenticated', 10, 2],
     });
@@ -114,7 +160,7 @@ describe('Town Hall membership: should_join', () => {
   });
 });
 
-describe('Town Hall membership: the hooks', () => {
+describe('Town Hall membership: the password hooks', () => {
   it('a new application password makes the user a Contributor on this site', () => {
     const res = runHook('on_password_created');
     assert.deepStrictEqual(res.member_checks, [[42, 5]]);
@@ -135,6 +181,65 @@ describe('Town Hall membership: the hooks', () => {
     assert.deepStrictEqual(runHook('on_password_created', { appId: 'other-app' }).joined, []);
     assert.deepStrictEqual(runHook('on_password_created', { site: 'https://www.forthexp.com' }).joined, []);
     assert.deepStrictEqual(runHook('on_password_created', { multisite: false }).joined, []);
+  });
+
+  it('another app is turned away before any filter or membership lookup', () => {
+    const res = runHook('on_password_created', { appId: 'other-app' });
+    assert.deepStrictEqual(res.filters, []);
+    assert.deepStrictEqual(res.member_checks, []);
+  });
+
+  it('the site allowlist comes from the xp_town_hall_site_urls filter', () => {
+    const rehearsal = 'http://localhost:8088/doit';
+    assert.deepStrictEqual(runHook('on_password_created', { site: rehearsal }).joined, []);
+    const res = runHook('on_password_created', { site: rehearsal, allowed: [rehearsal] });
+    assert.deepStrictEqual(res.filters, ['xp_town_hall_site_urls']);
+    assert.deepStrictEqual(res.joined, [[5, 42, 'contributor']]);
+  });
+});
+
+describe('Town Hall membership: before Approve (admin_init)', () => {
+  it('adds a non-member as a Contributor when they open the approval screen for this app', () => {
+    const res = runHook('on_admin_init');
+    assert.deepStrictEqual(res.member_checks, [[42, 5]]);
+    assert.deepStrictEqual(res.joined, [[5, 42, 'contributor']]);
+  });
+
+  it('uses the same allowlist filter as the other hooks', () => {
+    const rehearsal = 'http://localhost:8088/doit';
+    assert.deepStrictEqual(runHook('on_admin_init', { site: rehearsal }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { site: rehearsal, allowed: [rehearsal] }).joined, [[5, 42, 'contributor']]);
+  });
+
+  it('does nothing on any other admin page', () => {
+    for (const pagenow of ['index.php', 'users.php', 'profile.php', '']) {
+      assert.deepStrictEqual(runHook('on_admin_init', { pagenow }).joined, [], pagenow);
+    }
+  });
+
+  it('does nothing for another app id, a missing app id or a malformed one', () => {
+    assert.deepStrictEqual(runHook('on_admin_init', { requestAppId: 'other-app' }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { requestAppId: '' }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { requestAppId: NO_APP_ID }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { requestAppId: [APP_ID] }).joined, []);
+  });
+
+  it('does nothing for a visitor who is not signed in', () => {
+    const res = runHook('on_admin_init', { userId: 0 });
+    assert.deepStrictEqual(res.joined, []);
+    assert.deepStrictEqual(res.member_checks, []);
+  });
+
+  it('leaves a member, a single site and a site off the allowlist alone', () => {
+    assert.deepStrictEqual(runHook('on_admin_init', { member: true }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { multisite: false }).joined, []);
+    assert.deepStrictEqual(runHook('on_admin_init', { site: 'https://www.forthexp.com' }).joined, []);
+  });
+
+  it('turns another app away before any filter or membership lookup', () => {
+    const res = runHook('on_admin_init', { requestAppId: 'other-app' });
+    assert.deepStrictEqual(res.filters, []);
+    assert.deepStrictEqual(res.member_checks, []);
   });
 });
 

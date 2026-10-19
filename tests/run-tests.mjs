@@ -7,6 +7,7 @@ import './doit-mount.test.mjs';
 import './xp-pro-buy.test.mjs';
 import './family-rules.test.mjs';
 import './family-event-rules.test.mjs';
+import './family-two-phone-events.test.mjs';
 import './family-schema.test.mjs';
 import './town-hall-membership.test.mjs';
 

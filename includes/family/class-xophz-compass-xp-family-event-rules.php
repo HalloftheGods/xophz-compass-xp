@@ -18,10 +18,15 @@ class Xophz_Compass_Xp_Family_Event_Rules {
    *
    * Scope: public (the family's own devices in this base) or family (a parent, and the hero
    * it is about). Writer: home (the family's home device), server (PHP code on the site) or
-   * hero (a hero phone; none yet). Field types: int, bool, str40, str64, look.
+   * hero (a hero phone, by its hero key, for its own hero only); a kind names one writer or
+   * a list of them. Field types: int, bool, strN (a string of up to N characters), enum:a|b|c,
+   * look, stats and quests (the two parts of a hero sheet). A kind may carry max_bytes, its
+   * own cap on the size of its data, in place of MAX_DATA_BYTES.
    *
-   * A quest's name and category are never fields, because parents type them and they can
-   * be private. Gold is never a field, because it buys real rewards.
+   * A quest's name and category are never fields of a public kind, because parents type them
+   * and they can be private; only the hero's own phone and the parent see them, in a hero
+   * sheet. The same holds for gold, which buys real rewards: it is only in the family kinds
+   * hero.sheet and claim.settled, never in a public one.
    */
   const KINDS = [
     'hero.card'      => [
@@ -39,12 +44,56 @@ class Xophz_Compass_Xp_Family_Event_Rules {
       'writer' => 'home',
       'fields' => [ 'difficulty' => 'int', 'xp' => 'int', 'fight' => 'bool' ],
     ],
+    'quest.claimed'  => [
+      'scope'  => 'family',
+      'writer' => [ 'home', 'hero' ],
+      'fields' => [ 'questId' => 'str64', 'difficulty' => 'int', 'requiresApproval' => 'bool' ],
+    ],
+    'quest.approved' => [
+      'scope'  => 'family',
+      'writer' => 'home',
+      'fields' => [ 'questId' => 'str64', 'note' => 'str140' ],
+    ],
+    'quest.rejected' => [
+      'scope'  => 'family',
+      'writer' => 'home',
+      'fields' => [ 'questId' => 'str64', 'note' => 'str140' ],
+    ],
     'reward.granted' => [
       'scope'  => 'family',
       'writer' => 'server',
       'fields' => [ 'xp' => 'int', 'ap' => 'int', 'reason' => 'str40', 'sourceId' => 'str64' ],
     ],
+    'hero.sheet'     => [
+      'scope'     => 'family',
+      'writer'    => 'home',
+      'max_bytes' => 16384,
+      'fields'    => [ 'stats' => 'stats', 'quests' => 'quests' ],
+    ],
+    'claim.settled'  => [
+      'scope'  => 'family',
+      'writer' => 'home',
+      'fields' => [
+        'claimId' => 'str64', 'questId' => 'str64', 'status' => 'enum:pending|approved|rejected',
+        'note' => 'str140', 'xp' => 'int', 'gp' => 'int', 'ap' => 'int',
+      ],
+    ],
   ];
+
+  /** The numbers of a hero sheet's stats. */
+  const SHEET_STATS = [
+    'level' => 'int', 'xp' => 'int', 'nextLevelXp' => 'int', 'gp' => 'int', 'ap' => 'int',
+    'hp' => 'int', 'maxHp' => 'int', 'mp' => 'int', 'maxMp' => 'int',
+  ];
+
+  /** What a hero sheet keeps of one quest. */
+  const SHEET_QUEST = [
+    'questId' => 'str64', 'name' => 'str80', 'difficulty' => 'int', 'xp' => 'int', 'gp' => 'int',
+    'ap' => 'int', 'needsApproval' => 'bool', 'photo' => 'bool', 'overdue' => 'bool',
+  ];
+
+  /** Quests in a hero sheet; a longer list is refused, not cut. */
+  const SHEET_QUESTS_MAX = 60;
 
   /** The parts of a hero's voxel look; each value is a string of up to 32 characters. */
   const LOOK_FIELDS = [
@@ -55,7 +104,7 @@ class Xophz_Compass_Xp_Family_Event_Rules {
   const LOOK_VALUE_MAX  = 32;
   /** Events in one request. */
   const MAX_BATCH       = 50;
-  /** Bytes of an event's data as the device sent it (JSON, unicode unescaped). */
+  /** Bytes of an event's data as the device sent it (JSON, unicode unescaped), unless its kind sets max_bytes. */
   const MAX_DATA_BYTES  = 8192;
   const HERO_PER_HOUR   = 120;
   const FAMILY_PER_HOUR = 600;
@@ -84,22 +133,8 @@ class Xophz_Compass_Xp_Family_Event_Rules {
    */
   public static function filter_data( string $kind, array $data, array $kinds = self::KINDS ): array {
     $fields = $kinds[ $kind ]['fields'] ?? null;
-    if ( ! is_array( $fields ) ) {
-      return [];
-    }
 
-    $kept = [];
-    foreach ( $fields as $name => $type ) {
-      if ( ! array_key_exists( $name, $data ) ) {
-        continue;
-      }
-      list( $ok, $value ) = self::typed( (string) $type, $data[ $name ] );
-      if ( $ok ) {
-        $kept[ $name ] = $value;
-      }
-    }
-
-    return $kept;
+    return is_array( $fields ) ? self::keep( $fields, $data ) : [];
   }
 
   /**
@@ -126,7 +161,7 @@ class Xophz_Compass_Xp_Family_Event_Rules {
     $def = $kinds[ $kind ];
 
     $writer = $ctx['writer'] ?? null;
-    if ( ! is_string( $writer ) || ! in_array( $writer, self::WRITERS, true ) || ( $def['writer'] ?? null ) !== $writer ) {
+    if ( ! is_string( $writer ) || ! in_array( $writer, self::WRITERS, true ) || ! in_array( $writer, (array) ( $def['writer'] ?? [] ), true ) ) {
       return self::refuse( $id, 'This caller may not write that kind of event.' );
     }
 
@@ -155,12 +190,19 @@ class Xophz_Compass_Xp_Family_Event_Rules {
     }
 
     $data = $e['data'] ?? null;
-    if ( ! is_array( $data ) || ( [] !== $data && array_is_list( $data ) ) ) {
+    if ( ! is_array( $data ) || ( [] !== $data && self::is_list( $data ) ) ) {
       return self::refuse( $id, 'The data must be a JSON object.' );
     }
+    $max  = (int) ( $def['max_bytes'] ?? self::MAX_DATA_BYTES );
     $json = json_encode( $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
-    if ( false === $json || strlen( $json ) > self::MAX_DATA_BYTES ) {
-      return self::refuse( $id, 'The data is larger than ' . self::MAX_DATA_BYTES . ' bytes.' );
+    if ( false === $json || strlen( $json ) > $max ) {
+      return self::refuse( $id, 'The data is larger than ' . $max . ' bytes.' );
+    }
+
+    $kept    = self::filter_data( $kind, $data, $kinds );
+    $problem = self::unfit( (array) ( $def['fields'] ?? [] ), $data, $kept );
+    if ( null !== $problem ) {
+      return self::refuse( $id, $problem );
     }
 
     return [
@@ -172,7 +214,7 @@ class Xophz_Compass_Xp_Family_Event_Rules {
         'kind'        => $kind,
         'scope'       => $def['scope'],
         'occurred_at' => $at,
-        'data'        => self::filter_data( $kind, $data, $kinds ),
+        'data'        => $kept,
       ],
     ];
   }
@@ -254,6 +296,49 @@ class Xophz_Compass_Xp_Family_Event_Rules {
   }
 
   /**
+   * The fields of a map (name => type) that $data has with a value of the right type.
+   *
+   * @return array The kept fields, in the order the map lists them.
+   */
+  private static function keep( array $fields, array $data ): array {
+    $kept = [];
+    foreach ( $fields as $name => $type ) {
+      if ( ! array_key_exists( $name, $data ) ) {
+        continue;
+      }
+      list( $ok, $value ) = self::typed( (string) $type, $data[ $name ] );
+      if ( $ok ) {
+        $kept[ $name ] = $value;
+      }
+    }
+
+    return $kept;
+  }
+
+  /**
+   * Why an event with right-looking fields still cannot be kept, or null: a list of quests
+   * over SHEET_QUESTS_MAX (counted as the device sent it), or an enum field with no value of
+   * its own (an event with no status says nothing, so it is refused, not stored empty).
+   *
+   * @param array $fields The kind's fields.
+   * @param array $data   The data as the device sent it.
+   * @param array $kept   filter_data of that data.
+   */
+  private static function unfit( array $fields, array $data, array $kept ): ?string {
+    foreach ( $fields as $name => $type ) {
+      $type = (string) $type;
+      if ( 'quests' === $type && is_array( $data[ $name ] ?? null ) && count( $data[ $name ] ) > self::SHEET_QUESTS_MAX ) {
+        return 'The ' . $name . ' list holds at most ' . self::SHEET_QUESTS_MAX . ' quests.';
+      }
+      if ( 0 === strpos( $type, 'enum:' ) && ! array_key_exists( $name, $kept ) ) {
+        return 'The ' . $name . ' must be one of ' . implode( ', ', explode( '|', substr( $type, 5 ) ) ) . '.';
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * One value against one field type.
    *
    * @param mixed $v
@@ -273,8 +358,47 @@ class Xophz_Compass_Xp_Family_Event_Rules {
       $look = self::look( $v );
       return [] === $look ? [ false, null ] : [ true, $look ];
     }
+    if ( 0 === strpos( $type, 'enum:' ) ) {
+      return is_string( $v ) && in_array( $v, explode( '|', substr( $type, 5 ) ), true ) ? [ true, $v ] : [ false, null ];
+    }
+    if ( 'stats' === $type ) {
+      $stats = self::is_object( $v ) ? self::keep( self::SHEET_STATS, $v ) : [];
+      return [] === $stats ? [ false, null ] : [ true, $stats ];
+    }
+    if ( 'quests' === $type ) {
+      return is_array( $v ) && self::is_list( $v ) ? [ true, self::quests( $v ) ] : [ false, null ];
+    }
 
     return [ false, null ];
+  }
+
+  /**
+   * Whether an array is a list: keys 0, 1, 2... in order. Same answer as array_is_list, which is
+   * PHP 8.1 only; a JSON object with the keys "0" and "1" decodes to a list, as it does there.
+   */
+  private static function is_list( array $v ): bool {
+    return [] === $v || array_keys( $v ) === range( 0, count( $v ) - 1 );
+  }
+
+  /** Whether a decoded JSON value is a non-empty object (an empty one decodes to an empty list). @param mixed $v */
+  private static function is_object( $v ): bool {
+    return is_array( $v ) && [] !== $v && ! self::is_list( $v );
+  }
+
+  /**
+   * The quests of a hero sheet: each an object with only the SHEET_QUEST fields it has right.
+   * An entry that is not an object, or has no quest id of its own, is left out.
+   */
+  private static function quests( array $list ): array {
+    $quests = [];
+    foreach ( $list as $q ) {
+      $kept = self::is_object( $q ) ? self::keep( self::SHEET_QUEST, $q ) : [];
+      if ( '' !== ( $kept['questId'] ?? '' ) ) {
+        $quests[] = $kept;
+      }
+    }
+
+    return $quests;
   }
 
   /** Whether a value is a UTF-8 string of at most $max characters. @param mixed $v */

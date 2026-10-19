@@ -13,24 +13,24 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLASS_REL = '../includes/family/class-xophz-compass-xp-family-event-rules.php';
 const CLASS_FILE = path.join(HERE, CLASS_REL);
 
-const RULES = "require_once '/var/www/html/wp-content/plugins/xophz-compass-xp/includes/family/class-xophz-compass-xp-family-event-rules.php';\n";
-const CLS = 'Xophz_Compass_Xp_Family_Event_Rules';
+export const RULES = "require_once '/var/www/html/wp-content/plugins/xophz-compass-xp/includes/family/class-xophz-compass-xp-family-event-rules.php';\n";
+export const CLS = 'Xophz_Compass_Xp_Family_Event_Rules';
 
-const NOW = Date.UTC(2026, 9, 13, 10, 0, 0) / 1000;
-const iso = (secs) => new Date(secs * 1000).toISOString();
-const ID1 = '5b1d0f3a-2c4e-4a6b-8c9d-0e1f2a3b4c5d';
-const DEVICE = 'devicetest000001';
+export const NOW = Date.UTC(2026, 9, 13, 10, 0, 0) / 1000;
+export const iso = (secs) => new Date(secs * 1000).toISOString();
+export const ID1 = '5b1d0f3a-2c4e-4a6b-8c9d-0e1f2a3b4c5d';
+export const DEVICE = 'devicetest000001';
 
 const LOOK = {
   skin: 'tan', hair: 'short', hairColor: 'brown', face: 'smile', eyeColor: 'green', outfit: 'tunic',
   outfitColor: 'blue', outfitAccent: 'gold', hat: 'none', hatColor: 'red', leftHand: 'shield', rightHand: 'sword',
 };
 
-function lit(value) {
+export function lit(value) {
   return `json_decode(<<<'JSON'\n${JSON.stringify(value)}\nJSON\n, true)`;
 }
 
-const wireEvent = (over = {}) => ({
+export const wireEvent = (over = {}) => ({
   id: ID1,
   hero_id: 'h-1',
   device_id: DEVICE,
@@ -40,10 +40,10 @@ const wireEvent = (over = {}) => ({
   ...over,
 });
 
-const context = (over = {}) => ({ writer: 'home', hero_ids: ['h-1', 'h-2'], key_hero_id: null, now: NOW, ...over });
+export const context = (over = {}) => ({ writer: 'home', hero_ids: ['h-1', 'h-2'], key_hero_id: null, now: NOW, ...over });
 
 /** Run check_event once per [event, ctx, kinds?] row, in one PHP run. */
-function checks(rows) {
+export function checks(rows) {
   return runPhpJson(`${RULES}
     $rows = ${lit(rows)};
     $out = [];
@@ -68,20 +68,23 @@ function filters(rows) {
 }
 
 /** Body of a data object that is exactly `total` bytes as JSON (ASCII only). */
-function dataOfBytes(total) {
+export function dataOfBytes(total) {
   const empty = JSON.stringify({ pad: '' }).length;
   return { pad: 'a'.repeat(total - empty) };
 }
 
 describe('Family event rules: the kinds', () => {
-  it('lists the four kinds of the spec with their scope, writer and fields', () => {
+  it('lists the nine kinds with their scope, writer and fields', () => {
     const res = runPhpJson(`${RULES} echo json_encode( ${CLS}::KINDS );`);
-    assert.deepStrictEqual(res, {
-      'hero.card': { scope: 'public', writer: 'home', fields: { nickname: 'str40', look: 'look', jobClass: 'str40', level: 'int' } },
-      'hero.leveled': { scope: 'public', writer: 'home', fields: { level: 'int', jobClass: 'str40' } },
-      'quest.done': { scope: 'public', writer: 'home', fields: { difficulty: 'int', xp: 'int', fight: 'bool' } },
-      'reward.granted': { scope: 'family', writer: 'server', fields: { xp: 'int', ap: 'int', reason: 'str40', sourceId: 'str64' } },
-    });
+    assert.deepStrictEqual(Object.keys(res), [
+      'hero.card', 'hero.leveled', 'quest.done', 'quest.claimed', 'quest.approved', 'quest.rejected',
+      'reward.granted', 'hero.sheet', 'claim.settled',
+    ]);
+    assert.deepStrictEqual(res['hero.card'], { scope: 'public', writer: 'home', fields: { nickname: 'str40', look: 'look', jobClass: 'str40', level: 'int' } });
+    assert.deepStrictEqual(res['hero.leveled'], { scope: 'public', writer: 'home', fields: { level: 'int', jobClass: 'str40' } });
+    assert.deepStrictEqual(res['quest.done'], { scope: 'public', writer: 'home', fields: { difficulty: 'int', xp: 'int', fight: 'bool' } });
+    assert.deepStrictEqual(res['reward.granted'], { scope: 'family', writer: 'server', fields: { xp: 'int', ap: 'int', reason: 'str40', sourceId: 'str64' } });
+    // The five two-phone kinds are pinned in family-two-phone-events.test.mjs.
   });
 
   it('never lets a quest name, category or gold into a public kind', () => {

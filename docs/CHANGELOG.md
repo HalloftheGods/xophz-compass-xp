@@ -3,7 +3,7 @@
 All notable changes to the Xophz XP plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [26.10.19] - 2026-10-19
 
 ### Added
 - **Two-phone play events (#6097)**: the `xp-family/v1` event stream takes `quest.claimed` (from the home device or from a hero key for its own hero only), `quest.approved`, `quest.rejected`, `hero.sheet` (stats and up to 60 quests, 16 KB) and `claim.settled` (status `pending`, `approved` or `rejected`), all family scope. A kind may now name a list of writers and its own `max_bytes`; a hero key sending any other kind, or a claim for another hero, is refused per event in `rejected`.

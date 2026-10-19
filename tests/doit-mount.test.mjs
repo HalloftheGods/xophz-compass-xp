@@ -134,4 +134,14 @@ describe('Doit mount: dev server HTML', () => {
     assert.ok(res.html.includes('src="//localhost:8100/js/app.js"'), res.html);
     assert.ok(!res.html.includes('/dist/'), res.html);
   });
+
+  it('drops the Vite client the shared proxy injects, since ionic serve is webpack', () => {
+    const dev = '<html><head><link rel="icon" href="favicon.ico"><script defer src="//mycompass:8100/js/app.js"></script><script type="module" src="//mycompass:8100/@vite/client"></script>\n</head><body></body></html>';
+    const res = php(`
+      echo json_encode(['html' => Xophz_Compass_Xp_Doit::prepare_html(${JSON.stringify(dev)}, '/dist/', 8100)]);
+    `);
+    assert.ok(!res.html.includes('@vite/client'), res.html);
+    assert.ok(res.html.includes('src="//mycompass:8100/js/app.js"'), res.html);
+    assert.ok(res.html.includes('window.__XP_PUBLIC_PATH__="//mycompass:8100/"'), res.html);
+  });
 });

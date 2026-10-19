@@ -46,14 +46,14 @@ The XP System Native Views (`/routes/xp/`) aggressively utilize COMPASS atomic U
 XP can serve the [Do It For The XP](https://github.com/xopherdeep/do-it-for-the-xp) frontend at any permalink. The build is not shipped with the plugin (`public/dist/` is gitignored):
 
 1. In the app repo, run `pnpm build`.
-2. Upload the contents of its `dist/` folder to `wp-content/plugins/xophz-compass-xp/public/dist/`.
+2. Upload the contents of its `dist/` folder to `wp-content/plugins/xophz-compass-xp/public/dist/`. Locally, with the app checked out next to `Xophz-COMPASS`, `pnpm build:compass` builds straight into that folder.
 3. Open **Settings → Do It For The XP** and choose the permalink (default `doit`, nested paths like `play/doit` work). Optionally also load the app as the homepage or on a chosen page.
 
 Until `public/dist/index.html` exists, XP registers no routes and the settings page only says where to upload. Rewrite rules flush by themselves when the build appears or disappears or the settings change. Updating the plugin by replacing its folder deletes the upload, so re-upload after such an update.
 
 When hosted, the page sets `window.__XP_PUBLIC_PATH__` (so the app loads its files straight from `public/dist/`) and `window.wpApiSettings` (so the app calls this site's REST API with a nonce). The page is marked `DONOTCACHEPAGE`.
 
-In dev mode (`WP_DEBUG`, `WP_ENV=development`) the app is served from its dev server on port 8100 even without a build. The proxy looks for it on the hosts in `COMPASS_DEV_HOST`, then `compass`, `127.0.0.1`, `localhost` and `host.docker.internal`; when WordPress runs in Docker and `ionic serve` runs on the host, set `COMPASS_DEV_HOST` to the Docker gateway (e.g. `172.17.0.1`).
+In dev mode (`WP_DEBUG`, `WP_ENV=development`) the app is served from its dev server on port 8100 even without a build. The proxy looks for it on the hosts in `COMPASS_DEV_HOST`, then `compass`, `127.0.0.1`, `localhost`, `host.docker.internal` and finally the container's default gateway, so `ionic serve` on the host is found from the WordPress container without setup. Start it with `pnpm serve` in the app repo, then open the permalink. Add `?prod` to the URL to see the uploaded build instead.
 
 ## PHP Class Map
 

@@ -112,10 +112,12 @@ class Xophz_Compass_Xp_Doit {
    * The page is served at the permalink, but the files sit in public/dist, so relative
    * src/href attributes are made absolute and window.__XP_PUBLIC_PATH__ is set for the
    * app to hand to webpack. Dev server HTML already uses absolute URLs to :$dev_port;
-   * only its origin is passed on.
+   * only its origin is passed on, and the Vite client the shared proxy adds is dropped
+   * because ionic serve is webpack-dev-server, which brings its own HMR client.
    */
   public static function prepare_html( string $html, string $dist_url, int $dev_port ): string {
     if ( preg_match( '#(?:src|href)="(//[^/"]+:' . $dev_port . '/)#', $html, $match ) ) {
+      $html = preg_replace( '#<script type="module" src="[^"]*/@vite/client"></script>\n?#', '', $html );
       return self::inject_public_path( $html, $match[1] );
     }
 

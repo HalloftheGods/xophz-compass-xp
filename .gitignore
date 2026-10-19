@@ -1,2 +1,4 @@
 # Do It For The XP build: uploaded by hand per site, never committed
 /public/dist/
+# Chemical X local telemetry & audit history
+.chemx/

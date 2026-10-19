@@ -116,6 +116,32 @@ ok() {
 # A value from the last body: field <jq path>
 field() { jq -r "$1 // empty" "$TMP/body" 2> /dev/null; }
 
+# at_once <auth> <method> <path> <json body>...: one request per body, all sent at the same moment
+# (for the checks that must hold under concurrency). Leaves each status in $TMP/once.<n>.status
+# and each body in $TMP/once.<n>.body.
+at_once() {
+  local auth="$1" method="$2" path="$3" body i=0
+  shift 3
+  rm -f "$TMP"/once.*
+  for body in "$@"; do
+    i=$((i + 1))
+    local args=(-s -o "$TMP/once.$i.body" -w '%{http_code}\n' -X "$method" -H 'Content-Type: application/json' --data "$body")
+    case "$auth" in
+      none) ;;
+      key:*) args+=(-H "X-XP-Hero-Key: ${auth#key:}") ;;
+      *) args+=(-u "$auth") ;;
+    esac
+    curl "${args[@]}" "$API$path" > "$TMP/once.$i.status" 2> /dev/null &
+  done
+  wait
+}
+
+# once_count <status>: how many of the at_once answers had this status.
+once_count() { cat "$TMP"/once.*.status 2> /dev/null | grep -cx "$1"; }
+
+# All at_once statuses on one line, for a failure message.
+once_statuses() { cat "$TMP"/once.*.status 2> /dev/null | sort | uniq -c | tr -s ' \n' ' '; }
+
 # Run SQL on the rehearsal database (smoke rows only).
 sql() { wp db query "$1" --skip-column-names; }
 
@@ -330,6 +356,12 @@ section_family() {
 
   req "$PARENT_AUTH" POST /family "{\"family_id\":\"$F1\",\"device_id\":\"$D1\"}"
   ok "F1 from D1 is now home-elsewhere" ".status == 200 and .body.answer == \"home-elsewhere\""
+
+  # The hero of a hero route is the one in its path, never a hero_id in the query or the body.
+  req "$PARENT_AUTH" POST "/heroes/h-1?hero_id=h-7" '{"nickname":"Path","age_group":"child","hero_id":"h-8"}'
+  req "$PARENT_AUTH" GET /family
+  ok "POST /heroes/h-1 with another hero_id in the query and body saves h-1" \
+    '.status == 200 and ([.body.heroes[] | select(.hero_id == "h-1" and .nickname == "Path")] | length) == 1 and ([.body.heroes[] | select(.hero_id == "h-7" or .hero_id == "h-8")] | length) == 0'
 }
 
 # --- phones: link codes, claiming, hero keys, the phone list ---------------------------------
@@ -478,6 +510,19 @@ section_phones() {
     -H 'Access-Control-Request-Headers: x-xp-hero-key' "$API/family")"
   ok "CORS allows the X-XP-Hero-Key header" '.headers | test("access-control-allow-headers:[^\n]*x-xp-hero-key")'
   ok "CORS exposes Retry-After" '.headers | test("access-control-expose-headers:[^\n]*retry-after")'
+
+  # Wrong codes sent at the same moment still count one by one: at most 10 are tried in an hour.
+  sql "$(claim_counters_sql)" > /dev/null
+  local guesses=() n tried limited
+  for n in $(seq 1 20); do guesses+=("{\"code\":\"ZZZZZZZZ\",\"device_id\":\"$PHONE3\",\"label\":\"Smoke guess\"}"); done
+  at_once none POST /devices/claim "${guesses[@]}"
+  tried="$(once_count 404)"
+  limited="$(once_count 429)"
+  if [ "$tried" -ge 1 ] && [ "$tried" -le 10 ] && [ $((tried + limited)) = 20 ]; then
+    pass "20 wrong codes at once -> at most 10 tried (404), the rest 429"
+  else
+    fail "20 wrong codes at once -> at most 10 tried (404), the rest 429" "statuses $(once_statuses)"
+  fi
 
   # 10 failed claims per address per hour, then 429 (counted from a clean counter).
   sql "$(claim_counters_sql)" > /dev/null
@@ -642,11 +687,18 @@ section_events() {
   ok "51 events -> 400 xp_family_bad_request" '.status == 400 and .body.code == "xp_family_bad_request"'
 
   local sent=0 part
-  for part in 50 50 20; do
+  for part in 50 50; do
     req "$PARENT_AUTH" POST /events "$(quests "$part" h-3 "$D1")"
     if [ "$STATUS" = 200 ]; then sent=$((sent + $(jq '.accepted | length' "$TMP/body"))); fi
   done
-  if [ "$sent" = 120 ]; then pass "120 events for h-3 in three requests -> accepted"; else fail "120 events for h-3 in three requests -> accepted" "$sent accepted"; fi
+  # The last 20 of the hour, as six batches of 20 at the same moment: the limit is checked under
+  # the family's lock, so exactly one batch is taken and the other five get 429.
+  local bodies=() n
+  for n in 1 2 3 4 5 6; do bodies+=("$(quests 20 h-3 "$D1")"); done
+  at_once "$PARENT_AUTH" POST /events "${bodies[@]}"
+  sent=$((sent + $(jq -s 'map(.accepted // [] | length) | add // 0' "$TMP"/once.*.body)))
+  if [ "$sent" = 120 ]; then pass "120 events for h-3: 50, 50, then one of six batches of 20 sent at once"; else fail "120 events for h-3: 50, 50, then one of six batches of 20 sent at once" "$sent accepted; statuses $(once_statuses)"; fi
+  if [ "$(once_count 429)" = 5 ]; then pass "the other five batches sent at once -> 429"; else fail "the other five batches sent at once -> 429" "statuses $(once_statuses)"; fi
   req "$PARENT_AUTH" POST /events "$(quests 1 h-3 "$D1")"
   ok "one more for h-3 -> 429 with Retry-After: 600" '.status == 429 and .body.code == "xp_family_rate_limited" and .retry_after == "600"'
   req "$PARENT_AUTH" POST /events "$(quests 1 h-2 "$D1")"

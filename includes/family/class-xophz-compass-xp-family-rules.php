@@ -34,8 +34,12 @@ class Xophz_Compass_Xp_Family_Rules {
     'parent' => [
       'bind', 'move', 'read_family', 'save_hero', 'remove_hero', 'make_code', 'claim',
       'list_devices', 'unlink_device', 'send_events', 'read_events',
+      'put_records', 'read_records', 'play', 'rest',
     ],
-    'hero'   => [ 'read_family', 'unlink_device', 'send_events', 'read_events' ],
+    'hero'   => [
+      'read_family', 'unlink_device', 'send_events', 'read_events',
+      'put_records', 'read_records', 'play', 'rest',
+    ],
     'none'   => [ 'claim' ],
   ];
 

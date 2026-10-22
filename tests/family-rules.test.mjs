@@ -307,17 +307,27 @@ describe('Family rules: sites and callers', () => {
   const ACTIONS = [
     'bind', 'move', 'read_family', 'save_hero', 'remove_hero', 'make_code', 'claim',
     'list_devices', 'unlink_device', 'send_events', 'read_events',
+    'put_records', 'read_records', 'play', 'rest',
   ];
-  const HERO_MAY = ['read_family', 'unlink_device', 'send_events', 'read_events'];
+  const HERO_MAY = [
+    'read_family', 'unlink_device', 'send_events', 'read_events',
+    'put_records', 'read_records', 'play', 'rest',
+  ];
 
   it('a parent may every action', () => {
     const res = table('may', ACTIONS.map((a) => ['parent', a]));
     assert.deepStrictEqual(res, ACTIONS.map(() => true));
   });
 
-  it('a hero key may read the family, unlink, send and read events, and nothing else', () => {
+  it('a hero key may read the family, unlink, send and read events, use records and take its turn, and nothing else', () => {
     const res = table('may', ACTIONS.map((a) => ['hero', a]));
     assert.deepStrictEqual(res, ACTIONS.map((a) => HERO_MAY.includes(a)));
+  });
+
+  it('parent and hero may put_records, read_records, play and rest; none may not', () => {
+    const actions = ['put_records', 'read_records', 'play', 'rest'];
+    const res = table('may', ['parent', 'hero', 'none'].flatMap((caller) => actions.map((a) => [caller, a])));
+    assert.deepStrictEqual(res, [true, true, true, true, true, true, true, true, false, false, false, false]);
   });
 
   it('nobody may only claim', () => {

@@ -53,7 +53,7 @@ describe('Two-phone events: the kinds', () => {
     assert.deepStrictEqual(kinds['quest.claimed'], {
       scope: 'family',
       writer: ['home', 'hero'],
-      fields: { questId: 'str64', difficulty: 'int', requiresApproval: 'bool' },
+      fields: { questId: 'str64', difficulty: 'int', requiresApproval: 'bool', synced: 'bool' },
     });
     assert.deepStrictEqual(kinds['quest.approved'], { scope: 'family', writer: 'home', fields: { questId: 'str64', note: 'str140' } });
     assert.deepStrictEqual(kinds['quest.rejected'], { scope: 'family', writer: 'home', fields: { questId: 'str64', note: 'str140' } });

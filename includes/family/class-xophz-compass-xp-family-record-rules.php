@@ -26,19 +26,22 @@ class Xophz_Compass_Xp_Family_Record_Rules {
    *
    * The stores are those of the app's backup (BACKUP_STORES), less __localSettings, which
    * stays on its device. Scope: family (a Game Master writes it), family-any (a Game Master
-   * or any hero key of the family writes it: the chat) or hero (one hero's records: a hero
-   * key writes only its own hero's). hero_from: key (the record key is the hero id),
-   * key_prefix (the part of the key before the first colon), userId or heroId (that field of
-   * the body) or null (a family record belongs to no hero).
+   * or any hero key of the family writes it: the chat, the quests and the beasts) or hero
+   * (one hero's records: a hero key writes only its own hero's). hero_from: key (the record
+   * key is the hero id), key_prefix (the part of the key before the first colon), userId or
+   * heroId (that field of the body) or null (a family record belongs to no hero).
    *
    * A family-any record is read by everyone but owned by whoever wrote it: a hero key's record
    * carries that key's hero (so only that hero's key can rewrite or remove it), a Game Master's
-   * carries none. Everyone reads every row of such a store; ownership only limits writing.
+   * carries none. Everyone reads every row of such a store; ownership only limits writing. The
+   * quests (__achievements) and the beasts (__beasts) are such stores because a hero's phone
+   * makes both during play (a temple run, a quick task, a painted beast); a Game Master still
+   * writes any row of them.
    */
   const STORES = [
     '__achievementCategories' => [ 'scope' => 'family',     'hero_from' => null ],
-    '__beasts'                => [ 'scope' => 'family',     'hero_from' => null ],
-    '__achievements'          => [ 'scope' => 'family',     'hero_from' => null ],
+    '__beasts'                => [ 'scope' => 'family-any', 'hero_from' => null ],
+    '__achievements'          => [ 'scope' => 'family-any', 'hero_from' => null ],
     '__abilities'             => [ 'scope' => 'family',     'hero_from' => null ],
     '__accessories'           => [ 'scope' => 'family',     'hero_from' => null ],
     '__shops'                 => [ 'scope' => 'family',     'hero_from' => null ],
@@ -158,7 +161,8 @@ class Xophz_Compass_Xp_Family_Record_Rules {
       }
 
       if ( 'family-any' === $def['scope'] ) {
-        // The chat: any hero key writes it, and the row is then that hero's to rewrite or remove.
+        // The chat, the quests and the beasts: any hero key writes them, and the row is then that
+        // hero's to rewrite or remove (the store refuses a row that already belongs to someone else).
         $hero_id = $own;
       } elseif ( 'hero' !== $def['scope'] || $own !== $hero_id ) {
         return self::SCOPE;
@@ -207,7 +211,7 @@ class Xophz_Compass_Xp_Family_Record_Rules {
     return is_string( $id ) && 1 === preg_match( self::HERO_ID_SHAPE, $id ) ? $id : null;
   }
 
-  /** The stores any hero key may write (scope family-any): the chat. */
+  /** The stores any hero key may write (scope family-any), in the order of STORES: the beasts, the quests and the chat. */
   public static function any_writer_stores(): array {
     $names = [];
     foreach ( self::STORES as $name => $def ) {
@@ -223,8 +227,9 @@ class Xophz_Compass_Xp_Family_Record_Rules {
    * Whether a caller may read a stored record.
    *
    * A parent reads all. A hero key reads the family records (no hero), every row of a
-   * family-any store (the chat, whoever wrote it) and the records of its own hero. Anyone else
-   * reads nothing. The same filter as the store's query for a hero key.
+   * family-any store (the chat, the quests and the beasts, whoever wrote it) and the records
+   * of its own hero. Anyone else reads nothing. The same filter as the store's query for a
+   * hero key.
    *
    * @param array $row        A stored record: store and hero_id (null for a family record).
    * @param array $caller_ctx writer (parent or hero) and key_hero_id.

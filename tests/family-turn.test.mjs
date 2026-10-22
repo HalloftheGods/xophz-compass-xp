@@ -11,7 +11,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, assert, assertNoEmDashes } from '../../xophz-compass/tests/harness/test-framework.mjs';
-import { storeRun } from './family-store-fake.mjs';
+import { storeRun, routeRun } from './family-store-fake.mjs';
+import { gatekeeper } from './family-pro.test.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -256,6 +257,197 @@ describe('Hero turn: a revoked phone and a removed hero', () => {
       $store->remove_hero( 'fam-1', 'h-1' );
       $result = $store->take_turn( 'fam-1', 'h-1', '${TABLET}', 'the family tablet', false, ${NOW} );`);
     assert.deepStrictEqual(res.result, { answer: 'missing' });
+  });
+});
+
+describe('Hero turn: the play and rest routes', () => {
+  const PAID = { 'fam-1': { status: 'active', expires_at: null, plan: 'lifetime' } };
+  const PARENT_CALLER = { kind: 'parent', user_id: 7 };
+  const kid = (heroId = 'h-1', device = MIA) => ({ kind: 'hero', device: { id: 31, family_id: 'fam-1', hero_id: heroId, device_id: device } });
+  const lit = (value) => `json_decode(<<<'JSON'\n${JSON.stringify(value)}\nJSON\n, true)`;
+
+  const DUMP = `echo json_encode( [
+    'result' => wire( $result ),
+    'heroes' => $db->heroes,
+    'log'    => array_column( $db->log, 'sql' ),
+    'locks'  => array_keys( $db->locks ),
+  ] );`;
+
+  /** Build the fake family (heroes h-1 and h-2 free), seed it, then run `call` (which sets $result). */
+  function route(call, { setup = '', licences = PAID, who = null, request = '' } = {}) {
+    return routeRun(`
+      ${licences === null ? '' : gatekeeper(licences)}
+      $db = new FakeFamilyDb();
+      $db->add_family( 'fam-1', 0 );
+      $db->add_hero( 'fam-1', 'h-1' );
+      $db->add_hero( 'fam-1', 'h-2' );
+      ${setup}
+      $store  = new Xophz_Compass_Xp_Family_Store( $db );
+      $family = [ 'family_id' => 'fam-1', 'home_device_id' => 'homedevice000001' ];
+      ${who === null ? '' : `$rest = new StubRest( 'xp', '1', new StubFamilyStore( $db ) ); $rest->who = ${lit(who)}; $req = new StubRequest(); ${request}`}
+      ${call}
+      ${DUMP}`);
+  }
+
+  /** Records::play for the caller; `device` is the one the request names. */
+  function play(hero, device, label, { force = false, caller = PARENT_CALLER, ...rest } = {}) {
+    return route(`$result = Xophz_Compass_Xp_Family_Records::play( $store, $family, ${lit(caller)}, '${hero}', '${device}', ${php(label)}, ${force}, ${NOW} );`, rest);
+  }
+
+  function rest(hero, device, { caller = PARENT_CALLER, ...others } = {}) {
+    return route(`$result = Xophz_Compass_Xp_Family_Records::rest( $store, $family, ${lit(caller)}, '${hero}', '${device}', ${NOW} );`, others);
+  }
+
+  const proRequired = { error: 'xp_family_pro_required', status: 403 };
+  const MIAS = (extra = '') => `${held('h-1', MIA, "Mia's iPhone", NOW - 3600, NOW - 150)} ${extra}`;
+
+  it('play is granted when the hero is free or the asker already holds it, and sets the turn to that device and now', () => {
+    const res = play('h-1', TABLET, 'the family tablet');
+    assert.deepStrictEqual(res.result, { answer: 'granted' });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), { device: TABLET, label: 'the family tablet', taken: stamp(NOW), seen: stamp(NOW) });
+    assert.deepStrictEqual(turnOf(res, 'h-2'), FREE);
+
+    const again = play('h-1', MIA, "Mia's iPhone", { setup: MIAS() });
+    assert.deepStrictEqual(again.result, { answer: 'granted' });
+    assert.strictEqual(turnOf(again, 'h-1').device, MIA);
+  });
+
+  it('play is busy with the holder\'s label and last seen when another device holds it, as a plain 200 answer that changes nothing', () => {
+    const res = play('h-1', TABLET, 'the family tablet', { setup: MIAS() });
+    assert.deepStrictEqual(res.result, { answer: 'busy', device: { label: "Mia's iPhone", last_seen_at: iso(NOW - 150) } });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), { device: MIA, label: "Mia's iPhone", taken: stamp(NOW - 3600), seen: stamp(NOW - 150) });
+  });
+
+  it('play with force takes the turn from the holder', () => {
+    const res = play('h-1', TABLET, 'the family tablet', { force: true, setup: MIAS() });
+    assert.deepStrictEqual(res.result, { answer: 'granted' });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), { device: TABLET, label: 'the family tablet', taken: stamp(NOW), seen: stamp(NOW) });
+  });
+
+  it('play for a hero that is not there, or was removed, is a 404 xp_family_no_hero', () => {
+    const unknown = play('h-9', TABLET, 'the family tablet');
+    assert.deepStrictEqual(unknown.result, { error: 'xp_family_no_hero', status: 404 });
+    const removed = play('h-3', TABLET, 'the family tablet', { setup: "$db->add_hero( 'fam-1', 'h-3', [ 'removed_at' => '2026-10-02 00:00:00' ] );" });
+    assert.deepStrictEqual(removed.result, { error: 'xp_family_no_hero', status: 404 });
+  });
+
+  it('play passes the store\'s 503 xp_family_busy through when the family is busy', () => {
+    const res = play('h-1', TABLET, 'the family tablet', { setup: '$db->lock_free = false;' });
+    assert.deepStrictEqual(res.result, { error: 'xp_family_busy', status: 503 });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+  });
+
+  it('a hero key plays its own hero as its own phone, whatever device the request names, and cannot play another hero', () => {
+    const own = play('h-1', TABLET, 'the family tablet', { caller: kid('h-1', MIA), setup: MIAS() });
+    assert.deepStrictEqual(own.result, { answer: 'granted' }, 'the key\'s device is Mia\'s and Mia holds the turn');
+
+    const borrow = play('h-1', MIA, 'sneaky', { caller: kid('h-1', DAD), setup: MIAS() });
+    assert.deepStrictEqual(borrow.result.answer, 'busy', 'naming the holder\'s device does not make a phone the holder');
+
+    const other = play('h-2', MIA, "Mia's iPhone", { caller: kid('h-1', MIA) });
+    assert.deepStrictEqual(other.result, { error: 'xp_family_scope', status: 403 });
+    assert.deepStrictEqual(turnOf(other, 'h-2'), FREE);
+    assert.deepStrictEqual(other.log, [], 'refused before the database is asked');
+  });
+
+  it('play cleans the label: tags go, it is cut to 60 characters, and an empty one gets a default', () => {
+    const tagged = play('h-1', TABLET, '<b>Dad\'s</b>   <script>alert(1)</script>tablet');
+    assert.strictEqual(turnOf(tagged, 'h-1').label, "Dad's alert(1)tablet");
+    const long = play('h-1', TABLET, 'x'.repeat(80));
+    assert.strictEqual(turnOf(long, 'h-1').label, 'x'.repeat(60));
+    const empty = play('h-1', TABLET, '   ');
+    assert.strictEqual(turnOf(empty, 'h-1').label, 'A hero phone');
+  });
+
+  it('play and rest refuse a device id or a hero id of the wrong shape with 400', () => {
+    for (const device of ['', 'short', 'sixteen-chars-xx']) {
+      assert.deepStrictEqual(play('h-1', device, 'tablet').result, { error: 'xp_family_bad_request', status: 400 }, device);
+      assert.deepStrictEqual(rest('h-1', device).result, { error: 'xp_family_bad_request', status: 400 }, device);
+    }
+    assert.deepStrictEqual(play('h 1', TABLET, 'tablet').result, { error: 'xp_family_bad_request', status: 400 });
+    assert.deepStrictEqual(rest('', TABLET).result, { error: 'xp_family_bad_request', status: 400 });
+  });
+
+  it('play and rest answer an unentitled family 403 xp_family_pro_required before the database is touched', () => {
+    for (const licences of [null, {}, { 'fam-1': { status: 'revoked', expires_at: null, plan: 'yearly' } }]) {
+      for (const res of [play('h-1', TABLET, 'tablet', { licences }), rest('h-1', TABLET, { licences }), play('h-1', MIA, 'phone', { licences, caller: kid() })]) {
+        assert.deepStrictEqual(res.result, proRequired, JSON.stringify(licences));
+        assert.deepStrictEqual(res.log, []);
+        assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+      }
+    }
+  });
+
+  it('rest gives the turn back when the asker holds it, and answers rested', () => {
+    const res = rest('h-1', MIA, { setup: MIAS() });
+    assert.deepStrictEqual(res.result, { answer: 'rested' });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+  });
+
+  it('a late rest from a device that lost the turn answers rested and leaves the new holder alone', () => {
+    const res = rest('h-1', MIA, { setup: held('h-1', TABLET, 'the family tablet', NOW - 60, NOW - 30) });
+    assert.deepStrictEqual(res.result, { answer: 'rested' });
+    assert.deepStrictEqual(turnOf(res, 'h-1'), { device: TABLET, label: 'the family tablet', taken: stamp(NOW - 60), seen: stamp(NOW - 30) });
+    const nobody = rest('h-9', MIA);
+    assert.deepStrictEqual(nobody.result, { answer: 'rested' }, 'a hero that is not there has nothing to give back');
+  });
+
+  it('a hero key rests its own hero as its own phone, and cannot rest another hero', () => {
+    const own = rest('h-1', TABLET, { caller: kid('h-1', MIA), setup: MIAS() });
+    assert.deepStrictEqual(own.result, { answer: 'rested' });
+    assert.deepStrictEqual(turnOf(own, 'h-1'), FREE, 'the key\'s device held it, and the device in the request did not matter');
+
+    const other = rest('h-2', MIA, { caller: kid('h-1', MIA), setup: held('h-2', MIA, 'Mia too', NOW - 60, NOW - 60) });
+    assert.deepStrictEqual(other.result, { error: 'xp_family_scope', status: 403 });
+    assert.strictEqual(turnOf(other, 'h-2').device, MIA);
+  });
+
+  describe('Hero turn: the handlers', () => {
+    const PLAY = '$result = $rest->play( $req );';
+    const REST = '$result = $rest->rest( $req );';
+    const asks = (body, url = { hero_id: 'h-1' }, query = {}) =>
+      `$req->url = ${lit(url)}; $req->query = ${lit(query)}; $req->body = ${lit(body)};`;
+
+    it('POST /heroes/{id}/play takes the hero from the path, never from the body or the query', () => {
+      const res = route(PLAY, { who: PARENT_CALLER, request: asks({ device_id: TABLET, label: 'the family tablet', hero_id: 'h-2' }, { hero_id: 'h-1' }, { hero_id: 'h-2' }) });
+      assert.deepStrictEqual(res.result, { answer: 'granted' });
+      assert.strictEqual(turnOf(res, 'h-1').device, TABLET);
+      assert.deepStrictEqual(turnOf(res, 'h-2'), FREE, 'the hero_id in the body is ignored');
+    });
+
+    it('POST /heroes/{id}/rest takes the hero from the path, never from the body or the query', () => {
+      const setup = `${held('h-1', TABLET, 'the family tablet', NOW - 60, NOW - 60)} ${held('h-2', TABLET, 'the family tablet', NOW - 60, NOW - 60)}`;
+      const res = route(REST, { who: PARENT_CALLER, setup, request: asks({ device_id: TABLET, hero_id: 'h-2' }, { hero_id: 'h-1' }, { hero_id: 'h-2' }) });
+      assert.deepStrictEqual(res.result, { answer: 'rested' });
+      assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+      assert.strictEqual(turnOf(res, 'h-2').device, TABLET, 'the other hero keeps its turn');
+    });
+
+    it('a hero key is held to the hero of the path, not to a hero_id in the body', () => {
+      const res = route(PLAY, { who: kid('h-1', MIA), request: asks({ device_id: MIA, label: "Mia's iPhone", hero_id: 'h-1' }, { hero_id: 'h-2' }) });
+      assert.deepStrictEqual(res.result, { error: 'xp_family_scope', status: 403 });
+      assert.deepStrictEqual(turnOf(res, 'h-2'), FREE);
+    });
+
+    it('force counts only when it is true, "true" or 1', () => {
+      const values = [true, 'true', 1, '1', false, 'false', 0, '0', 'no', '', null, [], 'maybe'];
+      const res = route(`
+        $result = [];
+        foreach ( ${lit(values)} as $force ) {
+          ${MIAS()}
+          $req = new StubRequest();
+          $req->url  = [ 'hero_id' => 'h-1' ];
+          $req->body = [ 'device_id' => '${TABLET}', 'label' => 'the family tablet', 'force' => $force ];
+          $result[] = $rest->play( $req )['answer'];
+        }`, { who: PARENT_CALLER });
+      assert.deepStrictEqual(res.result, ['granted', 'granted', 'granted', 'granted', ...Array(9).fill('busy')]);
+    });
+
+    it('a parent names its device in the body, and a missing one is a 400', () => {
+      const res = route(PLAY, { who: PARENT_CALLER, request: asks({ label: 'the family tablet' }) });
+      assert.deepStrictEqual(res.result, { error: 'xp_family_bad_request', status: 400 });
+      assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+    });
   });
 });
 

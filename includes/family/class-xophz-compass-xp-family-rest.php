@@ -102,6 +102,19 @@ class Xophz_Compass_Xp_Family_Rest {
       [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'send_events' ], 'permission_callback' => '__return_true' ],
       [ 'methods' => WP_REST_Server::READABLE, 'callback' => [ $this, 'read_events' ], 'permission_callback' => '__return_true' ],
     ] );
+
+    register_rest_route( self::NAMESPACE, '/records', [
+      [ 'methods' => 'PUT', 'callback' => [ $this, 'put_records' ], 'permission_callback' => '__return_true' ],
+      [ 'methods' => WP_REST_Server::READABLE, 'callback' => [ $this, 'read_records' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/heroes/' . $hero . '/play', [
+      [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'play' ], 'permission_callback' => '__return_true' ],
+    ] );
+
+    register_rest_route( self::NAMESPACE, '/heroes/' . $hero . '/rest', [
+      [ 'methods' => WP_REST_Server::CREATABLE, 'callback' => [ $this, 'rest' ], 'permission_callback' => '__return_true' ],
+    ] );
   }
 
   /**
@@ -553,7 +566,107 @@ class Xophz_Compass_Xp_Family_Rest {
     return Xophz_Compass_Xp_Family_Events::read( $this->store(), $family, $caller, $since, max( 1, min( self::READ_LIMIT_MAX, $limit ) ) );
   }
 
+  // --- the family's save and a hero's turn ------------------------------------------------------
+
+  /**
+   * PUT /records { device_id, records: [...] } -> { accepted: [ { store, key, seq } ], refused: [ { store, key, code, message } ] }
+   * (see Xophz_Compass_Xp_Family_Records::put). Up to 50 records and 1 MB of bodies; a body is the record's JSON text.
+   */
+  public function put_records( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'put_records' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    return Xophz_Compass_Xp_Family_Records::put( $this->store(), $family, $caller, self::text( $r->get_param( 'device_id' ) ), $r->get_param( 'records' ), time() );
+  }
+
+  /**
+   * GET /records?since=&limit=&device_id= -> [ { seq, store, key, hero_id, device_id, saved_at, deleted, body } ]
+   * (see Xophz_Compass_Xp_Family_Records::read): limit 100 by default, at most 200. A parent adds
+   * the device it reads for, so that the turn it holds shows as seen.
+   */
+  public function read_records( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'read_records' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    $since = max( 0, (int) $r->get_param( 'since' ) );
+    $limit = null === $r->get_param( 'limit' ) ? self::READ_LIMIT : (int) $r->get_param( 'limit' );
+
+    return Xophz_Compass_Xp_Family_Records::read(
+      $this->store(),
+      $family,
+      $caller,
+      $since,
+      max( 1, min( self::READ_LIMIT_MAX, $limit ) ),
+      self::text( $r->get_param( 'device_id' ) ),
+      time()
+    );
+  }
+
+  /**
+   * POST /heroes/{hero_id}/play { device_id, label, force } -> { answer: granted } or
+   * { answer: busy, device: { label, last_seen_at } } (see Xophz_Compass_Xp_Family_Records::play)
+   */
+  public function play( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'play' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    return Xophz_Compass_Xp_Family_Records::play(
+      $this->store(),
+      $family,
+      $caller,
+      self::path_hero( $r ),
+      self::text( $r->get_param( 'device_id' ) ),
+      self::text( $r->get_param( 'label' ) ),
+      filter_var( $r->get_param( 'force' ), FILTER_VALIDATE_BOOLEAN ),
+      time()
+    );
+  }
+
+  /** POST /heroes/{hero_id}/rest { device_id } -> { answer: rested } (see Xophz_Compass_Xp_Family_Records::rest) */
+  public function rest( WP_REST_Request $r ) {
+    $caller = $this->guard( $r, 'rest' );
+    if ( is_wp_error( $caller ) ) {
+      return $caller;
+    }
+
+    $family = $this->family_for( $caller );
+    if ( is_wp_error( $family ) ) {
+      return $family;
+    }
+
+    return Xophz_Compass_Xp_Family_Records::rest( $this->store(), $family, $caller, self::path_hero( $r ), self::text( $r->get_param( 'device_id' ) ), time() );
+  }
+
   // --- helpers ---------------------------------------------------------------------------------
+
+  /**
+   * The hero id from the route's own path. get_param() would let a body or query field of the
+   * same name win over the path, and a hero key must not reach another hero that way.
+   */
+  private static function path_hero( WP_REST_Request $r ): string {
+    return self::text( $r->get_url_params()['hero_id'] ?? null );
+  }
 
   /**
    * The caller's address: Hookshot_Client_Ip::resolve() when Hookshot is active (it trusts

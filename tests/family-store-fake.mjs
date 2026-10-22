@@ -1,5 +1,5 @@
 /**
- * A small in-memory stand-in for wpdb, shared by the store suites (family-records.test.mjs and
+ * A small in-memory stand-in for wpdb, shared by the store and route suites (family-records.test.mjs and
  * family-turn.test.mjs). It holds the rows of the family tables and answers the exact statements
  * the store sends: prepare() keeps the SQL (white space folded) with its arguments, and an
  * unknown statement throws, so a changed query fails a test instead of passing unseen. Like MySQL
@@ -176,6 +176,14 @@ class FakeFamilyDb {
       }
       return $found;
     }
+    if ( 'SELECT * FROM wp_xp_family_heroes WHERE family_id = %s AND removed_at IS NULL ORDER BY created_at, hero_id' === $sql ) {
+      $found = [];
+      foreach ( $this->heroes as $h ) {
+        if ( $h['family_id'] === $a[0] && null === $h['removed_at'] ) { $found[] = $this->text( $h ); }
+      }
+      usort( $found, function ( $x, $y ) { return [ $x['created_at'], $x['hero_id'] ] <=> [ $y['created_at'], $y['hero_id'] ]; } );
+      return $found;
+    }
     if ( 'SELECT * FROM wp_xp_family_heroes WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL' === $sql ) {
       $h = $this->heroes[ $a[0] . '|' . $a[1] ] ?? null;
       return ( null === $h || null !== $h['removed_at'] ) ? null : $this->text( $h );
@@ -249,4 +257,46 @@ class FakeFamilyDb {
 /** Run PHP after the stand-in and the store are loaded; the snippet echoes the JSON it wants back. */
 export function storeRun(code) {
   return runPhpJson(`${FAKE_DB}\n${code}`);
+}
+
+/**
+ * The routes over the stand-in (family-records and family-turn "Routes" suites): the Pro gate, the
+ * Records class and the REST class, with a request that reads a parameter the way WordPress does
+ * (the body first, then the query, then the path), a store that knows one family (fam-1, owned by
+ * every user) and a REST class whose caller the test chooses instead of reading a header or a
+ * session. The Gatekeeper stand-in is the test's to add (family-pro.test.mjs: gatekeeper()).
+ */
+export const ROUTE_STUBS = `
+require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-pro.php';
+require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-records.php';
+require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-rest.php';
+
+class StubRequest extends WP_REST_Request {
+  public $body  = [];
+  public $query = [];
+  public $url   = [];
+  public function get_param( $key ) { return $this->body[ $key ] ?? $this->query[ $key ] ?? $this->url[ $key ] ?? null; }
+  public function get_url_params() { return $this->url; }
+}
+
+class StubFamilyStore extends Xophz_Compass_Xp_Family_Store {
+  public function family( string $family_id ): ?array {
+    return 'fam-1' === $family_id ? [ 'family_id' => 'fam-1', 'home_device_id' => 'homedevice000001' ] : null;
+  }
+  public function family_of_user( int $user_id ): ?array { return $this->family( 'fam-1' ); }
+}
+
+class StubRest extends Xophz_Compass_Xp_Family_Rest {
+  public $who = [ 'kind' => 'none' ];
+  public function caller( WP_REST_Request $r ) { return $this->who; }
+}
+
+function wire( $r ) {
+  return is_wp_error( $r ) ? [ 'error' => $r->get_error_code(), 'status' => $r->get_error_data()['status'] ?? null ] : $r;
+}
+`;
+
+/** Run PHP after the stand-in, the store and the route classes are loaded. */
+export function routeRun(code) {
+  return storeRun(`${ROUTE_STUBS}\n${code}`);
 }

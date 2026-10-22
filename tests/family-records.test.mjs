@@ -9,11 +9,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, assert, assertNoEmDashes } from '../../xophz-compass/tests/harness/test-framework.mjs';
 import { runPhpJson, lintPhpFile } from '../../xophz-compass/tests/harness/php-executor.mjs';
-import { storeRun } from './family-store-fake.mjs';
+import { storeRun, routeRun } from './family-store-fake.mjs';
+import { gatekeeper } from './family-pro.test.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLASS_REL = '../includes/family/class-xophz-compass-xp-family-record-rules.php';
 const CLASS_FILE = path.join(HERE, CLASS_REL);
+const RECORDS_REL = '../includes/family/class-xophz-compass-xp-family-records.php';
+const REST_REL = '../includes/family/class-xophz-compass-xp-family-rest.php';
+const FAMILY_DIR = '/var/www/html/wp-content/plugins/xophz-compass-xp/includes/family';
 
 const RULES = "require_once '/var/www/html/wp-content/plugins/xophz-compass-xp/includes/family/class-xophz-compass-xp-family-record-rules.php';\n";
 const CLS = 'Xophz_Compass_Xp_Family_Record_Rules';
@@ -914,3 +918,462 @@ describe('Record rules: the file', () => {
     }
   });
 });
+
+describe('Routes: the records class', () => {
+  const NOW = 1792000000;
+  const stamp = (unix) => new Date(unix * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const iso = (unix) => new Date(unix * 1000).toISOString().slice(0, 19) + 'Z';
+  const SEEN = NOW - 600;
+  const KID = 'kidphone00000001';
+  const TABLET = 'familytablet0001';
+  const DAD = 'dadphone00000001';
+
+  const PAID = { 'fam-1': { status: 'active', expires_at: null, plan: 'lifetime' } };
+  const PARENT_CALLER = { kind: 'parent', user_id: 7 };
+  const kid = (heroId = 'h-1', device = KID) => ({ kind: 'hero', device: { id: 31, family_id: 'fam-1', hero_id: heroId, device_id: device } });
+
+  const shop = (key, over = {}) => rec('__shops', key, { name: key }, over);
+  const log = (key, heroId, over = {}) => rec('__questLog', key, { userId: heroId, questId: 'q-1' }, { hero_id: heroId, ...over });
+  const chat = (key) => rec('__chat', key, { text: 'hello' });
+
+  /** Seed a hero whose turn `device` holds (taken an hour ago, last seen ten minutes ago). */
+  const holds = (heroId, device) =>
+    `$db->add_hero( 'fam-1', '${heroId}', [ 'turn_device_id' => '${device}', 'turn_label' => 'Held', 'turn_taken_at' => '${stamp(NOW - 3600)}', 'turn_seen_at' => '${stamp(SEEN)}' ] );`;
+  const free = (heroId) => `$db->add_hero( 'fam-1', '${heroId}' );`;
+
+  /** What a run hands back: the result as the route would answer it, and the stand-in's state (bodies cut to 200 bytes, so a 1 MB batch fits the pipe). */
+  const DUMP = `echo json_encode( [
+    'result'  => wire( $result ),
+    'rows'    => array_map( function ( $row ) { $row['body'] = substr( $row['body'], 0, 200 ); return $row; }, array_values( $db->records ) ),
+    'heroes'  => $db->heroes,
+    'counter' => $db->families['fam-1']['records_seq'],
+    'log'     => array_column( $db->log, 'sql' ),
+    'args'    => array_map( function ( $args ) { return array_map( function ( $a ) { return is_string( $a ) ? substr( $a, 0, 200 ) : $a; }, $args ); }, array_column( $db->log, 'args' ) ),
+    'locks'   => array_keys( $db->locks ),
+    'outside' => $db->outside_lock,
+  ] );`;
+
+  /** Build the fake family, then run `call` (which sets $result) against it. `licences` are the Gatekeeper stand-in's records; null leaves the plugin out. */
+  function run(call, { setup = '', licences = PAID } = {}) {
+    return routeRun(`
+      ${licences === null ? '' : gatekeeper(licences)}
+      $db = new FakeFamilyDb();
+      $db->add_family( 'fam-1', 40 );
+      ${setup}
+      $store  = new Xophz_Compass_Xp_Family_Store( $db );
+      $family = [ 'family_id' => 'fam-1', 'home_device_id' => 'homedevice000001' ];
+      ${call}
+      ${DUMP}`);
+  }
+
+  /** One Records::put; `records` is a JS value, or { php } for PHP that makes the list (a 1 MB batch is built there, not sent through the pipe). */
+  function put(records, { caller = PARENT_CALLER, device = TABLET, ...rest } = {}) {
+    const list = records !== null && typeof records === 'object' && 'php' in records ? records.php : lit(records);
+    return run(`$result = Xophz_Compass_Xp_Family_Records::put( $store, $family, ${lit(caller)}, '${device}', ${list}, ${NOW} );`, rest);
+  }
+
+  /** PHP for a list of shop records whose bodies are `sizes` bytes of JSON each (keys big-1, big-2, ...). */
+  const bigShops = (...sizes) => ({
+    php: `array_map( function ( $n, $size ) {
+      return [ 'store' => '__shops', 'key' => 'big-' . ( $n + 1 ), 'hero_id' => null, 'deleted' => false,
+               'body' => '{"pad":"' . str_repeat( 'a', $size - 10 ) . '"}' ];
+    }, array_keys( ${lit(sizes)} ), ${lit(sizes)} )`,
+  });
+
+  function read(since, limit, { caller = PARENT_CALLER, device = '', ...rest } = {}) {
+    return run(`$result = Xophz_Compass_Xp_Family_Records::read( $store, $family, ${lit(caller)}, ${since}, ${limit}, '${device}', ${NOW} );`, rest);
+  }
+
+  const proRequired = { error: 'xp_family_pro_required', status: 403 };
+  const invalid = { error: 'xp_family_record_invalid', status: 400 };
+  const seen = (res, heroId) => res.heroes[`fam-1|${heroId}`].turn_seen_at;
+
+  it('put refuses an unentitled family with 403 xp_family_pro_required, before it sends a single statement', () => {
+    const lapsed = { 'fam-1': { status: 'active', expires_at: iso(NOW - 4 * 86400), plan: 'monthly' } };
+    const revoked = { 'fam-1': { status: 'revoked', expires_at: null, plan: 'yearly' } };
+    for (const licences of [null, {}, lapsed, revoked]) {
+      const res = put([shop('s-1')], { licences });
+      assert.deepStrictEqual(res.result, proRequired, JSON.stringify(licences));
+      assert.deepStrictEqual(res.rows, []);
+      assert.deepStrictEqual(res.log, [], 'the gate is first: the database was not touched');
+      assert.strictEqual(res.counter, 40);
+    }
+
+    const phone = put('not a list', { caller: kid(), licences: null });
+    assert.deepStrictEqual(phone.result, proRequired, 'a hero key is gated too, and before the batch is looked at');
+  });
+
+  it('put answers accepted and refused per record and carries on after a refusal', () => {
+    const res = put(
+      [
+        shop('s-1'),
+        { store: '__nope', key: 'x', hero_id: null, deleted: false, body: '{}' },
+        shop(' padded '),
+        log('ql-1', 'h-1'),
+        log('ql-2', 'h-2'),
+        'junk',
+        chat('c-1'),
+      ],
+      { setup: `${holds('h-1', TABLET)} ${free('h-2')}` },
+    );
+
+    assert.deepStrictEqual(res.result.accepted, [
+      { store: '__shops', key: 's-1', seq: 41 },
+      { store: '__questLog', key: 'ql-1', seq: 42 },
+      { store: '__chat', key: 'c-1', seq: 43 },
+    ]);
+    assert.deepStrictEqual(res.result.refused.map((r) => [r.store, r.key, r.code]), [
+      ['__nope', 'x', 'xp_family_store_unknown'],
+      ['__shops', ' padded ', 'xp_family_record_invalid'],
+      ['', '', 'xp_family_record_invalid'],
+      ['__questLog', 'ql-2', 'xp_family_turn'],
+    ], 'the record rules refuse first, in the order sent, then the store');
+    for (const r of res.result.refused) {
+      assert.deepStrictEqual(Object.keys(r), ['store', 'key', 'code', 'message']);
+      assert.ok(r.message.length > 0, r.code);
+    }
+    assert.deepStrictEqual(Object.keys(res.result), ['accepted', 'refused']);
+    assert.deepStrictEqual(res.rows.map((row) => row.record_key).sort(), ['c-1', 'ql-1', 's-1']);
+    assert.strictEqual(res.counter, 43, 'a refused record takes no number');
+    for (const row of res.rows) assert.strictEqual(row.device_id, TABLET);
+  });
+
+  it('a hero record from a non-holder is refused with xp_family_turn, and the holder\'s goes through and is seen', () => {
+    const mine = put([log('ql-1', 'h-1')], { device: TABLET, setup: holds('h-1', TABLET) });
+    assert.deepStrictEqual(mine.result.accepted, [{ store: '__questLog', key: 'ql-1', seq: 41 }]);
+    assert.strictEqual(seen(mine, 'h-1'), stamp(NOW), 'the holder\'s last seen moves');
+
+    const other = put([log('ql-1', 'h-1'), shop('s-1')], { device: DAD, setup: holds('h-1', TABLET) });
+    assert.deepStrictEqual(other.result.refused.map((r) => [r.key, r.code]), [['ql-1', 'xp_family_turn']]);
+    assert.deepStrictEqual(other.result.accepted.map((r) => r.key), ['s-1'], 'family records need no turn');
+    assert.strictEqual(seen(other, 'h-1'), stamp(SEEN), 'a refused write does not refresh the holder');
+
+    const nobody = put([log('ql-1', 'h-1')], { device: DAD, setup: free('h-1') });
+    assert.deepStrictEqual(nobody.result.refused.map((r) => r.code), ['xp_family_turn'], 'a free turn must be taken (play) before it is written');
+  });
+
+  it('put does not ask who holds the turn itself: the store decides, under the lock', () => {
+    const res = put([log('ql-1', 'h-1')], { setup: holds('h-1', TABLET) });
+    assert.deepStrictEqual(res.log.filter((sql) => /^SELECT turn_device_id/.test(sql)), []);
+    assert.deepStrictEqual(res.outside, []);
+  });
+
+  it('a hero key writes as its own phone whatever device the request names, and only what a hero key may write', () => {
+    const res = put(
+      [chat('c-1'), shop('s-1'), log('ql-1', 'h-1'), log('ql-2', 'h-2'), log('ql-sib', 'h-1')],
+      {
+        caller: kid('h-1', KID),
+        device: TABLET,
+        setup: `${holds('h-1', KID)} ${holds('h-2', KID)} $db->add_record( 'fam-1', '__questLog', 'ql-sib', 8, 'h-2', '{"userId":"h-2"}' );`,
+      },
+    );
+    assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-1', 'ql-1']);
+    assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [
+      ['s-1', 'xp_family_scope'],
+      ['ql-2', 'xp_family_scope'],
+      ['ql-sib', 'xp_family_scope'],
+    ], 'a family store, another hero, and another hero\'s existing row');
+    for (const row of res.rows.filter((r) => r.seq > 40)) assert.strictEqual(row.device_id, KID, 'the key\'s device, not the one in the request');
+
+    const lost = put([log('ql-1', 'h-1')], { caller: kid('h-1', KID), device: TABLET, setup: holds('h-1', TABLET) });
+    assert.deepStrictEqual(lost.result.refused.map((r) => r.code), ['xp_family_turn'], 'a phone cannot borrow the tablet\'s turn by naming its device');
+    assert.deepStrictEqual(lost.rows, []);
+  });
+
+  it('a parent must name its device with 16 letters and digits', () => {
+    for (const device of ['', 'short', 'has a space 0000', 'sixteen-chars-xx']) {
+      const res = put([shop('s-1')], { device });
+      assert.deepStrictEqual(res.result, { error: 'xp_family_bad_request', status: 400 }, JSON.stringify(device));
+      assert.deepStrictEqual(res.rows, []);
+    }
+  });
+
+  it('put refuses a body that is not a list, 51 records or more than 1 MB of bodies, whole, with 400 xp_family_record_invalid', () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => shop(`s-${i}`));
+    for (const records of ['text', null, 7, { a: shop('s-1') }, [...fifty, shop('s-50')]]) {
+      const res = put(records);
+      assert.deepStrictEqual(res.result, invalid, JSON.stringify(records).slice(0, 40));
+      assert.deepStrictEqual(res.log, [], 'nothing was sent to the database');
+    }
+
+    const all = put(fifty);
+    assert.strictEqual(all.result.accepted.length, 50);
+    assert.strictEqual(all.counter, 90);
+
+    const exact = put(bigShops(524288, 524288));
+    assert.deepStrictEqual(exact.result.accepted.map((r) => r.key), ['big-1', 'big-2'], '1 MB exactly is allowed');
+
+    const over = put(bigShops(524288, 524288, 12));
+    assert.deepStrictEqual(over.result, invalid, 'two bodies at the cap and twelve bytes more');
+    assert.deepStrictEqual(over.rows, []);
+  });
+
+  it('an empty list is a valid batch that answers empty lists and writes nothing', () => {
+    const res = put([]);
+    assert.deepStrictEqual(res.result, { accepted: [], refused: [] });
+    assert.deepStrictEqual(res.log.filter((sql) => sql.startsWith('SELECT GET_LOCK')), []);
+  });
+
+  it('relays the store\'s 503 when the family is busy and its 404 when the family is gone', () => {
+    const busy = put([shop('s-1')], { setup: '$db->lock_free = false;' });
+    assert.deepStrictEqual(busy.result, { error: 'xp_family_busy', status: 503 });
+    const gone = run(`$result = Xophz_Compass_Xp_Family_Records::put( $store, [ 'family_id' => 'fam-9' ], ${lit(PARENT_CALLER)}, '${TABLET}', ${lit([shop('s-1')])}, ${NOW} );`, { licences: { 'fam-9': PAID['fam-1'] } });
+    assert.deepStrictEqual(gone.result, { error: 'xp_family_no_family', status: 404 });
+  });
+
+  const SEEDS = `
+    $db->add_record( 'fam-1', '__shops', 's-1', 3, null, '{"name":"Smithy"}' );
+    $db->add_record( 'fam-1', '__profiles', 'h-1', 5, 'h-1', '{"id":"h-1"}' );
+    $db->add_record( 'fam-1', '__profiles', 'h-2', 7, 'h-2', '{"id":"h-2"}' );
+    $db->add_record( 'fam-1', '__chat', 'c-1', 9, null, '{"text":"hi"}' );
+    $db->add_record( 'fam-1', '__questLog', 'ql-1', 11, 'h-1', '{"userId":"h-1"}' );
+    $db->add_record( 'fam-1', '__shops', 's-gone', 13, null, '', 1 );
+    $db->add_record( 'fam-2', '__shops', 's-1', 4, null, '{"name":"another family"}' );`;
+  const seqs = (res) => res.result.map((row) => row.seq);
+
+  it('read filters by the hero key\'s hero and a parent reads everything of the family', () => {
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS })), [3, 5, 7, 9, 11, 13]);
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-1') })), [3, 5, 9, 11, 13]);
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-2') })), [3, 7, 9, 13]);
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-3') })), [3, 9, 13]);
+  });
+
+  it('read goes after the number given, oldest first, up to the limit', () => {
+    assert.deepStrictEqual(seqs(read(5, 100, { setup: SEEDS })), [7, 9, 11, 13]);
+    assert.deepStrictEqual(seqs(read(5, 2, { setup: SEEDS })), [7, 9]);
+    assert.deepStrictEqual(seqs(read(13, 100, { setup: SEEDS })), []);
+  });
+
+  it('read answers rows in the wire shape: the body as its JSON text, a removal with deleted true and an empty body', () => {
+    const res = read(8, 100, { setup: SEEDS });
+    assert.deepStrictEqual(res.result, [
+      { seq: 9, store: '__chat', key: 'c-1', hero_id: null, device_id: 'olddevice0000001', saved_at: '2026-10-01T00:00:00Z', deleted: false, body: '{"text":"hi"}' },
+      { seq: 11, store: '__questLog', key: 'ql-1', hero_id: 'h-1', device_id: 'olddevice0000001', saved_at: '2026-10-01T00:00:00Z', deleted: false, body: '{"userId":"h-1"}' },
+      { seq: 13, store: '__shops', key: 's-gone', hero_id: null, device_id: 'olddevice0000001', saved_at: '2026-10-01T00:00:00Z', deleted: true, body: '' },
+    ]);
+    assert.deepStrictEqual(Object.keys(res.result[0]), ['seq', 'store', 'key', 'hero_id', 'device_id', 'saved_at', 'deleted', 'body']);
+  });
+
+  it('read touches the last seen of the heroes the caller\'s device holds, with one query for them, and no other', () => {
+    const held = `${holds('h-1', KID)} ${holds('h-2', TABLET)} ${holds('h-3', DAD)} ${free('h-4')}`;
+    const everyone = (res) => Object.keys(res.heroes).filter((k) => res.heroes[k].turn_seen_at === stamp(NOW)).map((k) => k.split('|')[1]);
+
+    const phone = read(0, 100, { setup: held, caller: kid('h-1', KID) });
+    assert.deepStrictEqual(everyone(phone), ['h-1']);
+    const heroQueries = phone.log.filter((sql) => sql.startsWith('SELECT * FROM wp_xp_family_heroes'));
+    assert.strictEqual(heroQueries.length, 1, 'one query finds the held heroes');
+
+    const tablet = read(0, 100, { setup: held, device: TABLET });
+    assert.deepStrictEqual(everyone(tablet), ['h-2'], 'a parent names its device on the query');
+
+    const nameless = read(0, 100, { setup: held });
+    assert.deepStrictEqual(everyone(nameless), [], 'a parent that names no device touches nothing');
+    assert.deepStrictEqual(nameless.log.filter((sql) => sql.includes('xp_family_heroes')), []);
+
+    const stranger = read(0, 100, { setup: held, device: 'nobodysdevice001' });
+    assert.deepStrictEqual(everyone(stranger), []);
+    assert.strictEqual(seen(stranger, 'h-1'), stamp(SEEN));
+  });
+
+  it('read of an unentitled family is 403 xp_family_pro_required and touches nothing; a bad device id is a 400', () => {
+    const res = read(0, 100, { setup: SEEDS, licences: null, device: TABLET });
+    assert.deepStrictEqual(res.result, proRequired);
+    assert.deepStrictEqual(res.log, []);
+
+    const bad = read(0, 100, { setup: SEEDS, device: 'not a device id' });
+    assert.deepStrictEqual(bad.result, { error: 'xp_family_bad_request', status: 400 });
+  });
+
+  it('every entry point refuses a caller that is neither a parent nor a hero key', () => {
+    const res = run(`
+      $none = [ 'kind' => 'none' ];
+      $result = [
+        wire( Xophz_Compass_Xp_Family_Records::put( $store, $family, $none, '${TABLET}', [], ${NOW} ) ),
+        wire( Xophz_Compass_Xp_Family_Records::read( $store, $family, $none, 0, 10, '', ${NOW} ) ),
+      ];`);
+    assert.deepStrictEqual(res.result, [{ error: 'xp_family_forbidden', status: 403 }, { error: 'xp_family_forbidden', status: 403 }]);
+  });
+});
+
+describe('Routes: the handlers', () => {
+  const NOW = 1792000000;
+  const KID = 'kidphone00000001';
+  const TABLET = 'familytablet0001';
+  const PAID = { 'fam-1': { status: 'active', expires_at: null, plan: 'lifetime' } };
+  const PARENT_CALLER = { kind: 'parent', user_id: 7 };
+  const kid = (heroId = 'h-1', device = KID) => ({ kind: 'hero', device: { id: 31, family_id: 'fam-1', hero_id: heroId, device_id: device } });
+  const none = { kind: 'none' };
+
+  /** Run `call` against a StubRest whose caller is `who`; $req is the request, $rest the routes. */
+  function handle(call, { who = PARENT_CALLER, setup = '', licences = PAID, request = '' } = {}) {
+    return routeRun(`
+      ${licences === null ? '' : gatekeeper(licences)}
+      $db = new FakeFamilyDb();
+      $db->add_family( 'fam-1', 40 );
+      $db->add_hero( 'fam-1', 'h-1' );
+      ${setup}
+      $rest = new StubRest( 'xp', '1', new StubFamilyStore( $db ) );
+      $rest->who = ${lit(who)};
+      $req = new StubRequest();
+      ${request}
+      ${call}
+      echo json_encode( [ 'result' => wire( $result ), 'rows' => array_values( $db->records ), 'args' => array_column( $db->log, 'args' ), 'log' => array_column( $db->log, 'sql' ) ] );`);
+  }
+
+  const REQUESTS = {
+    put_records: `$req->body = [ 'device_id' => '${TABLET}', 'records' => [] ];`,
+    read_records: '',
+    play: `$req->url = [ 'hero_id' => 'h-1' ]; $req->body = [ 'device_id' => '${TABLET}', 'label' => 'the family tablet' ];`,
+    rest: `$req->url = [ 'hero_id' => 'h-1' ]; $req->body = [ 'device_id' => '${TABLET}' ];`,
+  };
+  const HANDLERS = Object.keys(REQUESTS);
+
+  /** Every handler for every caller in one run: { 'name/kind': what the handler answered }. */
+  function everyHandler(whos, { licences = PAID } = {}) {
+    const calls = whos.flatMap((who) => HANDLERS.map((name) =>
+      `$rest->who = ${lit(who)}; $req = new StubRequest(); ${REQUESTS[name]} $result['${name}/${who.kind}'] = wire( $rest->${name}( $req ) );`));
+    return handle(`$result = []; ${calls.join('\n')}`, { licences }).result;
+  }
+
+  it('each of the four handlers answers nobody 401, then lets a parent and a hero key through the guard', () => {
+    const answers = everyHandler([none, PARENT_CALLER, kid()]);
+    for (const name of HANDLERS) {
+      assert.deepStrictEqual(answers[`${name}/none`], { error: 'rest_not_logged_in', status: 401 }, name);
+      for (const kind of ['parent', 'hero']) {
+        assert.ok(!('error' in answers[`${name}/${kind}`]), `${name} for ${kind}: ${JSON.stringify(answers[`${name}/${kind}`])}`);
+      }
+    }
+  });
+
+  it('each of the four handlers answers an unentitled family 403 xp_family_pro_required', () => {
+    const answers = everyHandler([PARENT_CALLER, kid()], { licences: null });
+    for (const name of HANDLERS) {
+      for (const kind of ['parent', 'hero']) {
+        assert.deepStrictEqual(answers[`${name}/${kind}`], { error: 'xp_family_pro_required', status: 403 }, `${name} for ${kind}`);
+      }
+    }
+  });
+
+  it('PUT /records reads device_id and records from the body and answers the per-record lists', () => {
+    const body = JSON.stringify({ name: 'Smithy' });
+    const wire = { device_id: TABLET, records: [{ store: '__shops', key: 's-1', hero_id: null, deleted: false, body }] };
+    const res = handle('$result = $rest->put_records( $req );', { request: `$req->body = ${lit(wire)};` });
+    assert.deepStrictEqual(res.result, { accepted: [{ store: '__shops', key: 's-1', seq: 41 }], refused: [] });
+    assert.strictEqual(res.rows[0].body, body, 'the body is stored as the text it came as');
+    assert.strictEqual(res.rows[0].device_id, TABLET);
+
+    const missing = handle('$result = $rest->put_records( $req );', { request: `$req->body = ${lit({ device_id: TABLET })};` });
+    assert.deepStrictEqual(missing.result, { error: 'xp_family_record_invalid', status: 400 });
+  });
+
+  it('GET /records reads since and limit from the query: limit 100 by default, 1 to 200', () => {
+    const queries = [{}, { since: '41', limit: '7' }, { since: '-5', limit: '0' }, { limit: '5000' }, { since: 'abc', limit: 'abc' }];
+    const res = handle(`
+      $result = [];
+      foreach ( ${lit(queries)} as $query ) {
+        $req = new StubRequest();
+        $req->query = $query;
+        $db->log = [];
+        $rest->read_records( $req );
+        foreach ( $db->log as $q ) {
+          if ( 0 === strpos( $q['sql'], 'SELECT * FROM wp_xp_family_records' ) ) { $result[] = $q['args']; }
+        }
+      }`);
+    assert.deepStrictEqual(res.result, [['fam-1', 0, 100], ['fam-1', 41, 7], ['fam-1', 0, 1], ['fam-1', 0, 200], ['fam-1', 0, 1]]);
+  });
+
+  it('GET /records takes device_id from the query to touch the turn the device holds', () => {
+    const res = handle('$result = $rest->read_records( $req );', {
+      setup: `$db->add_hero( 'fam-1', 'h-1', [ 'turn_device_id' => '${TABLET}', 'turn_seen_at' => '2026-10-01 00:00:00' ] );`,
+      request: `$req->query = ${lit({ device_id: TABLET })};`,
+    });
+    assert.deepStrictEqual(res.result, []);
+    assert.ok(res.log.some((sql) => sql.startsWith('UPDATE wp_xp_family_heroes SET turn_seen_at')), 'the holder\'s last seen was refreshed');
+  });
+
+  it('GET /records for a hero key asks only for its own hero\'s rows', () => {
+    const res = handle('$result = $rest->read_records( $req );', { who: kid('h-1') });
+    const at = res.log.findIndex((sql) => sql.startsWith('SELECT * FROM wp_xp_family_records'));
+    assert.ok(res.log[at].includes('hero_id IS NULL OR hero_id = %s'), res.log[at]);
+    assert.deepStrictEqual(res.args[at], ['fam-1', 0, 'h-1', 100]);
+  });
+});
+
+describe('Routes: registered', () => {
+  const REGISTER = `
+    require_once '${FAMILY_DIR}/class-xophz-compass-xp-family-rules.php';
+    require_once '${FAMILY_DIR}/class-xophz-compass-xp-family-schema.php';
+    require_once '${FAMILY_DIR}/class-xophz-compass-xp-family-rest.php';
+    $GLOBALS['home'] = 'https://doit.forthexp.com';
+    $GLOBALS['registered'] = [];
+    function home_url() { return $GLOBALS['home']; }
+    class WP_REST_Server { const READABLE = 'GET'; const CREATABLE = 'POST'; const EDITABLE = 'POST, PUT, PATCH'; const DELETABLE = 'DELETE'; }
+    function register_rest_route( $ns, $route, $handlers ) {
+      foreach ( $handlers as $h ) {
+        $GLOBALS['registered'][] = [ 'ns' => $ns, 'route' => $route, 'methods' => $h['methods'], 'callback' => $h['callback'][1], 'permission' => $h['permission_callback'] ];
+      }
+    }
+    $rest = new Xophz_Compass_Xp_Family_Rest( 'xp', '1' );
+    $rest->register_routes();
+    $on = $GLOBALS['registered'];
+    $GLOBALS['registered'] = [];
+    $GLOBALS['home'] = 'https://example.com';
+    $rest->register_routes();
+    $hero = [];
+    foreach ( $on as $r ) {
+      $hero[ $r['callback'] ] = [ 'play' => preg_match( '#^' . $r['route'] . '$#', '/heroes/h-1/play', $m1 ) ? $m1['hero_id'] : null,
+                                   'rest' => preg_match( '#^' . $r['route'] . '$#', '/heroes/h-1/rest', $m2 ) ? $m2['hero_id'] : null ];
+    }
+    echo json_encode( [ 'on' => $on, 'off' => $GLOBALS['registered'], 'hero' => $hero ] );`;
+
+  const NEW_HANDLERS = ['put_records', 'read_records', 'play', 'rest'];
+
+  it('registers PUT and GET /records and POST /heroes/{hero_id}/play and /rest under xp-family/v1', () => {
+    const { on } = runPhpJson(REGISTER);
+    const mine = on.filter((r) => NEW_HANDLERS.includes(r.callback));
+    assert.deepStrictEqual(mine.map((r) => [r.methods, r.route, r.callback]), [
+      ['PUT', '/records', 'put_records'],
+      ['GET', '/records', 'read_records'],
+      ['POST', '/heroes/(?P<hero_id>[A-Za-z0-9_-]{1,64})/play', 'play'],
+      ['POST', '/heroes/(?P<hero_id>[A-Za-z0-9_-]{1,64})/rest', 'rest'],
+    ]);
+    for (const r of mine) {
+      assert.strictEqual(r.ns, 'xp-family/v1');
+      assert.strictEqual(r.permission, '__return_true', 'the guard in the handler decides, as on the other family routes');
+    }
+  });
+
+  it('the hero routes capture the hero id from the path, each only its own verb', () => {
+    const { hero } = runPhpJson(REGISTER);
+    assert.deepStrictEqual(hero.play, { play: 'h-1', rest: null });
+    assert.deepStrictEqual(hero.rest, { play: null, rest: 'h-1' });
+    assert.deepStrictEqual(hero.save_hero, { play: null, rest: null }, 'the older hero route is not shadowed');
+  });
+
+  it('registers nothing off a family site', () => {
+    const { off } = runPhpJson(REGISTER);
+    assert.deepStrictEqual(off, []);
+  });
+
+  it('keeps the older routes registered', () => {
+    const { on } = runPhpJson(REGISTER);
+    const callbacks = on.map((r) => r.callback);
+    for (const name of ['bind', 'read_family', 'save_hero', 'send_events', 'read_events', 'claim']) assert.ok(callbacks.includes(name), name);
+  });
+});
+
+describe('Routes: the files', () => {
+  it('the records class and the REST class lint', () => {
+    for (const rel of [RECORDS_REL, REST_REL]) {
+      const lint = lintPhpFile(path.join(HERE, rel));
+      assert.strictEqual(lint.isValid, true, lint.output);
+    }
+  });
+
+  it('the files carry no em dashes', () => {
+    for (const rel of [RECORDS_REL, REST_REL, 'family-store-fake.mjs']) {
+      assertNoEmDashes(fs.readFileSync(path.join(HERE, rel), 'utf8'), rel);
+    }
+  });
+});
+

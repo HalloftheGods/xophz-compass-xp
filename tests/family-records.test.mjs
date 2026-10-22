@@ -165,6 +165,21 @@ describe('Record rules', () => {
     assert.deepStrictEqual(res, ['h-2', 'h-3', null, null, null, null, null, null, null, null, null, null, null, null, 'x'.repeat(64), null, null, null, null]);
   });
 
+  it('refuses a key with white space at either end, live or removed, whoever sends it', () => {
+    // MySQL compares a key without its trailing spaces, so 'ql-sib ' would reach the row 'ql-sib'.
+    const keys = ['k ', ' k', 'k  ', ' ', '\tk', 'k\t', 'k\n', '\nk', 'k\r', 'k\u0000', '\u000bk'];
+    const rows = [];
+    for (const key of keys) {
+      rows.push([rec('__shops', key, {}), PARENT]);
+      rows.push([tomb('__shops', key), PARENT]);
+      rows.push([rec('__questLog', key, { userId: 'h-1' }, { hero_id: 'h-1' }), heroKey('h-1')]);
+      rows.push([tomb('__questLog', key, { hero_id: 'h-1' }), heroKey('h-1')]);
+    }
+    rows.push([rec('__shops', 'k j', {}), PARENT], [rec('__shops', 'k ', {}), PARENT]);
+    const codes = checks(rows).map((r) => (typeof r === 'string' ? r : 'ok'));
+    assert.deepStrictEqual(codes, [...keys.flatMap(() => [INVALID, INVALID, INVALID, INVALID]), 'ok', 'ok']);
+  });
+
   it('refuses an unknown store, a key over 191 chars, a body over 512 KB, a body that is not an object', () => {
     const res = checks([
       [rec('__nope', 'k', {}), PARENT],
@@ -446,7 +461,8 @@ describe('Record rules', () => {
 
 describe('Record store', () => {
   const NOW = 1792000000;
-  const STAMP = new Date(NOW * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const stamp = (unix) => new Date(unix * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const STAMP = stamp(NOW);
   const PHONE = 'phone-a-0000001';
   const STORE_REL = '../includes/family/class-xophz-compass-xp-family-store.php';
 
@@ -455,17 +471,24 @@ describe('Record store', () => {
   const gone = (store, key, over = {}) => ({ store, key, hero_id: null, deleted: true, body: '', ...over });
   const hero = (store, key, heroId, body = '{"userId":"' + heroId + '"}') => clean(store, key, body, { hero_id: heroId });
 
+  const SEEN = NOW - 600;
+  /** Seed a hero whose turn `device` holds (taken an hour ago, last seen ten minutes ago). */
+  const holds = (heroId, device) =>
+    `$db->add_hero( 'fam-1', '${heroId}', [ 'turn_device_id' => '${device}', 'turn_label' => 'Held', 'turn_taken_at' => '${stamp(NOW - 3600)}', 'turn_seen_at' => '${stamp(SEEN)}' ] );`;
+
   /** Build a fake database with `setup`, run `call` (which sets $result), and answer what changed. */
   function run(setup, call) {
     return storeRun(`
       $db = new FakeFamilyDb();
       $db->add_family( 'fam-1', 40 );
+      ${holds('h-1', PHONE)} ${holds('h-2', PHONE)}
       ${setup}
       $store = new Xophz_Compass_Xp_Family_Store( $db );
       ${call}
       echo json_encode( [
         'result'   => is_wp_error( $result ) ? [ 'error' => $result->get_error_code(), 'status' => $result->get_error_data()['status'] ] : $result,
         'rows'     => array_values( $db->records ),
+        'heroes'   => $db->heroes,
         'counters' => array_map( function ( $f ) { return $f['records_seq']; }, $db->families ),
         'log'      => array_column( $db->log, 'sql' ),
         'args'     => array_column( $db->log, 'args' ),
@@ -666,6 +689,19 @@ describe('Record store', () => {
       assert.deepStrictEqual(res.result.refused.map((r) => r.key), ['ql-sib', 'ql-sib']);
     });
 
+    it('a trailing space cannot get past the ownership check: MySQL reads \'ql-sib \' as the row \'ql-sib\'', () => {
+      const res = asKid([
+        hero('__questLog', 'ql-sib ', 'h-1', '{"userId":"h-1","v":"hijack"}'),
+        gone('__questLog', 'ql-sib ', { hero_id: 'h-1' }),
+        hero('__questLog', 'ql-mine ', 'h-1', '{"userId":"h-1","v":"edited"}'),
+      ]);
+      assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [['ql-sib ', 'xp_family_scope'], ['ql-sib ', 'xp_family_scope']]);
+      assert.deepStrictEqual(res.result.accepted, [{ store: '__questLog', key: 'ql-mine ', seq: 41 }], 'its own row is still its own, and only that write is numbered');
+      const sibling = res.rows.find((row) => row.record_key === 'ql-sib');
+      assert.deepStrictEqual([sibling.seq, sibling.hero_id, sibling.deleted, sibling.body], [8, 'h-2', 0, '{"userId":"h-2","v":"sibling"}'], 'the sibling\'s row is untouched');
+      assert.strictEqual(res.counters['fam-1'], 41);
+    });
+
     it('a row nobody owns (chat) stays writable by any hero key', () => {
       const res = asKid([clean('__chat', 'c-1', '{"text":"edited"}'), gone('__chat', 'c-1')]);
       assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-1', 'c-1']);
@@ -691,7 +727,123 @@ describe('Record store', () => {
     });
   });
 
-  describe('Record store: records_after', () => {
+  describe('Record store: the hero turn, checked under the lock', () => {
+  const NOW = 1792000000;
+  const stamp = (unix) => new Date(unix * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const PHONE = 'phone-a-0000001';
+  const TABLET = 'familytablet0001';
+  const SEEN = stamp(NOW - 600);
+  const MESSAGE = 'Another device is playing this hero.';
+
+  const clean = (store, key, body, over = {}) => ({ store, key, hero_id: null, deleted: false, body, ...over });
+  const gone = (store, key, over = {}) => ({ store, key, hero_id: null, deleted: true, body: '', ...over });
+  const hero = (store, key, heroId) => clean(store, key, '{"userId":"' + heroId + '"}', { hero_id: heroId });
+  const held = (heroId, device) =>
+    `$db->add_hero( 'fam-1', '${heroId}', [ 'turn_device_id' => '${device}', 'turn_label' => 'Held', 'turn_taken_at' => '${stamp(NOW - 3600)}', 'turn_seen_at' => '${SEEN}' ] );`;
+
+  /** A fake family where `setup` seeds the heroes; one upsert from PHONE (a hero key's hero when `caller` is given). */
+  function put(records, { setup = '', caller = null } = {}) {
+    return storeRun(`
+      $db = new FakeFamilyDb();
+      $db->add_family( 'fam-1', 40 );
+      ${setup}
+      $store = new Xophz_Compass_Xp_Family_Store( $db );
+      $result = $store->upsert_records( 'fam-1', '${PHONE}', ${lit(records)}, ${NOW}, ${caller === null ? 'null' : `'${caller}'`} );
+      echo json_encode( [
+        'result'  => is_wp_error( $result ) ? [ 'error' => $result->get_error_code() ] : $result,
+        'rows'    => array_values( $db->records ),
+        'heroes'  => $db->heroes,
+        'counter' => $db->families['fam-1']['records_seq'],
+        'log'     => array_column( $db->log, 'sql' ),
+        'args'    => array_column( $db->log, 'args' ),
+        'locks'   => array_keys( $db->locks ),
+        'outside' => $db->outside_lock,
+      ] );`);
+  }
+  const seen = (res, heroId) => res.heroes[`fam-1|${heroId}`].turn_seen_at;
+  const taken = (res, heroId) => res.heroes[`fam-1|${heroId}`].turn_taken_at;
+
+  it('refuses a hero record from a device that does not hold the turn, unnumbered, and keeps the rest of the batch', () => {
+    const res = put(
+      [clean('__shops', 's-1', '{}'), hero('__questLog', 'ql-1', 'h-1'), clean('__chat', 'c-1', '{"text":"hi"}'), hero('__profiles', 'h-1', 'h-1')],
+      { setup: held('h-1', TABLET) },
+    );
+    assert.deepStrictEqual(res.result.accepted, [{ store: '__shops', key: 's-1', seq: 41 }, { store: '__chat', key: 'c-1', seq: 42 }]);
+    assert.deepStrictEqual(res.result.refused.map((r) => [r.store, r.key, r.code, r.message]), [
+      ['__questLog', 'ql-1', 'xp_family_turn', MESSAGE],
+      ['__profiles', 'h-1', 'xp_family_turn', MESSAGE],
+    ]);
+    assert.deepStrictEqual(Object.keys(res.result.refused[0]), ['store', 'key', 'code', 'message']);
+    assert.strictEqual(res.counter, 42, 'a refused record takes no number');
+    assert.deepStrictEqual(res.rows.map((row) => row.record_key).sort(), ['c-1', 's-1']);
+    assert.strictEqual(seen(res, 'h-1'), SEEN, 'a refused write does not refresh the holder\'s last seen');
+  });
+
+  it('refuses a removal of a hero record from a non-holder too', () => {
+    const res = put([gone('__questLog', 'ql-1', { hero_id: 'h-1' }), gone('__profiles', 'h-1', { hero_id: 'h-1' })], {
+      setup: `${held('h-1', TABLET)} $db->add_record( 'fam-1', '__questLog', 'ql-1', 7, 'h-1', '{"userId":"h-1"}' );`,
+    });
+    assert.deepStrictEqual(res.result.refused.map((r) => r.code), ['xp_family_turn', 'xp_family_turn']);
+    assert.deepStrictEqual(res.result.accepted, []);
+    assert.deepStrictEqual(res.rows.map((row) => [row.seq, row.deleted]), [[7, 0]], 'the record is still live');
+  });
+
+  it('accepts the holder\'s write and refreshes last seen for the heroes it wrote, only', () => {
+    const res = put([hero('__questLog', 'ql-1', 'h-1'), clean('__shops', 's-1', '{}')], { setup: `${held('h-1', PHONE)} ${held('h-2', PHONE)}` });
+    assert.deepStrictEqual(res.result.accepted.map((r) => r.seq), [41, 42]);
+    assert.deepStrictEqual(res.result.refused, []);
+    assert.strictEqual(seen(res, 'h-1'), stamp(NOW));
+    assert.strictEqual(taken(res, 'h-1'), stamp(NOW - 3600), 'the turn was not taken again');
+    assert.strictEqual(seen(res, 'h-2'), SEEN, 'a hero it did not write is not refreshed');
+  });
+
+  it('a batch of family records and chat touches no turn and asks for no hero', () => {
+    const res = put([clean('__shops', 's-1', '{}'), clean('__chat', 'c-1', '{}'), gone('__shops', 's-2')], { setup: held('h-1', PHONE) });
+    assert.deepStrictEqual(res.result.accepted.map((r) => r.seq), [41, 42, 43]);
+    assert.strictEqual(seen(res, 'h-1'), SEEN);
+    assert.deepStrictEqual(res.log.filter((sql) => sql.includes('turn_device_id')), []);
+  });
+
+  it('a parent device needs the turn too, and so does a hero for a hero that is not there or was removed', () => {
+    const res = put(
+      [hero('__questLog', 'ql-1', 'h-1'), hero('__questLog', 'ql-9', 'h-9'), hero('__questLog', 'ql-3', 'h-3'), hero('__questLog', 'ql-4', 'h-4')],
+      { setup: `${held('h-1', TABLET)} $db->add_hero( 'fam-1', 'h-3', [ 'turn_device_id' => '${PHONE}', 'removed_at' => '2026-10-02 00:00:00' ] ); ${held('h-4', PHONE)}` },
+    );
+    assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['ql-4']);
+    assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [['ql-1', 'xp_family_turn'], ['ql-9', 'xp_family_turn'], ['ql-3', 'xp_family_turn']]);
+  });
+
+  it('a hero key holds to the same rule, and writes its own hero\'s records when it holds the turn', () => {
+    const mine = put([hero('__questLog', 'ql-1', 'h-1')], { setup: held('h-1', PHONE), caller: 'h-1' });
+    assert.deepStrictEqual(mine.result.accepted.map((r) => r.seq), [41]);
+    const lost = put([hero('__questLog', 'ql-1', 'h-1')], { setup: held('h-1', TABLET), caller: 'h-1' });
+    assert.deepStrictEqual(lost.result.refused.map((r) => r.code), ['xp_family_turn']);
+  });
+
+  it('asks for the batch\'s heroes once, under the lock before it numbers, and refreshes last seen before it lets go', () => {
+    const res = put(
+      [hero('__questLog', 'a', 'h-1'), hero('__questLog', 'b', 'h-2'), hero('__questLog', 'c', 'h-1'), clean('__shops', 's', '{}')],
+      { setup: `${held('h-1', PHONE)} ${held('h-2', PHONE)}` },
+    );
+    const at = (pattern) => res.log.findIndex((sql) => pattern.test(sql));
+    const looks = res.log.filter((sql) => sql.startsWith('SELECT hero_id, turn_device_id FROM wp_xp_family_heroes'));
+    assert.strictEqual(looks.length, 1, 'one query for the batch');
+    assert.deepStrictEqual(res.args[at(/^SELECT hero_id, turn_device_id/)], ['fam-1', 'h-1', 'h-2']);
+    const lock = at(/^SELECT GET_LOCK/);
+    const look = at(/^SELECT hero_id, turn_device_id/);
+    const reserve = at(/^UPDATE wp_xp_families SET records_seq/);
+    const lastWrite = res.log.map((sql, i) => [sql, i]).filter(([sql]) => sql.startsWith('INSERT INTO')).pop()[1];
+    const touches = res.log.map((sql, i) => [sql, i]).filter(([sql]) => sql.startsWith('UPDATE wp_xp_family_heroes SET turn_seen_at')).map(([, i]) => i);
+    const release = at(/^SELECT RELEASE_LOCK/);
+    assert.ok(lock < look && look < reserve, `lock ${lock}, look ${look}, reserve ${reserve}`);
+    assert.strictEqual(touches.length, 2, 'once per hero written');
+    assert.ok(touches.every((i) => i > lastWrite && i < release), `touches ${touches}, last write ${lastWrite}, release ${release}`);
+    assert.deepStrictEqual(res.outside, []);
+    assert.deepStrictEqual(res.locks, []);
+  });
+});
+
+describe('Record store: records_after', () => {
     const rows = `
       $db->add_record( 'fam-1', '__questLog', 'q-1', 11, 'h-1', '{"userId":"h-1"}' );
       $db->add_record( 'fam-1', '__shops', 's-1', 3, null, '{"name":"Smithy"}' );

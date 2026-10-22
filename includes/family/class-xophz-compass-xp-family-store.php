@@ -330,9 +330,9 @@ class Xophz_Compass_Xp_Family_Store {
   }
 
   /**
-   * Unlink a phone of this family, and give back any hero's turn it held. A phone of another
-   * family is never touched; a phone that was already revoked clears nothing (its device id may
-   * hold a turn again by now).
+   * Unlink a phone of this family, and give back the turn of its hero if it held it. A phone of
+   * another family is never touched; a phone that was already revoked clears nothing (its device
+   * id may hold a turn again by now).
    *
    * @return bool Whether a linked phone was revoked now.
    */
@@ -349,14 +349,14 @@ class Xophz_Compass_Xp_Family_Store {
       return false;
     }
 
-    $this->db->query( $this->db->prepare(
-      "UPDATE {$this->t( 'xp_family_heroes' )}
-       SET turn_device_id = NULL, turn_label = '', turn_taken_at = NULL, turn_seen_at = NULL
-       WHERE family_id = %s AND turn_device_id = ( SELECT device_id FROM {$devices} WHERE id = %d AND family_id = %s )",
-      $family_id,
-      $id,
-      $family_id
-    ) );
+    // Only the turn of the phone's own hero: the same device id may hold other heroes elsewhere.
+    $phone = $this->db->get_row(
+      $this->db->prepare( "SELECT hero_id, device_id FROM {$devices} WHERE id = %d AND family_id = %s", $id, $family_id ),
+      ARRAY_A
+    );
+    if ( is_array( $phone ) ) {
+      $this->rest_turn( $family_id, (string) $phone['hero_id'], (string) $phone['device_id'] );
+    }
 
     return true;
   }
@@ -539,7 +539,14 @@ class Xophz_Compass_Xp_Family_Store {
    * A hero key ($caller_hero_id) may not touch a row that already belongs to another hero,
    * live write or tombstone: such a record is refused with xp_family_scope and takes no number.
    * A row that belongs to nobody (chat) stays open to it, and a parent is never restricted.
-   * The turn is not checked here: the caller asks turn_holder() first.
+   * Keys are compared without their trailing spaces, as MySQL compares them.
+   *
+   * The turn is checked here, under the lock, and the routes rely on it (they do not check it
+   * first): a record of a hero-scope store (Record_Rules::STORES), live or removed, from a
+   * device that does not hold that hero's turn is refused with xp_family_turn and takes no
+   * number. Family records and chat are never turn-checked. take_turn takes the same lock, so
+   * once a takeover has been granted no batch of the old holder can still land. The heroes whose
+   * records were written get their last seen refreshed before the lock is let go.
    *
    * A record that could not be written is in neither list, so the device sends it again.
    *
@@ -549,7 +556,8 @@ class Xophz_Compass_Xp_Family_Store {
    * @param int         $now            Unix time of the write.
    * @param string|null $caller_hero_id The hero of the key when a hero phone sends the batch.
    * @return array|WP_Error [ 'accepted' => [ [ store, key, seq ] ], 'refused' => [ [ store, key,
-   *                        code, message ] ] ], both in the order the records came in; 503
+   *                        code, message ] ] ] (codes xp_family_scope, xp_family_turn), both in the
+   *                        order the records came in; 503
    *                        xp_family_busy when the lock could not be taken; 404
    *                        xp_family_no_family when the family is not there.
    */
@@ -574,17 +582,17 @@ class Xophz_Compass_Xp_Family_Store {
         return new WP_Error( 'xp_family_no_family', 'There is no such family.', [ 'status' => 404 ] );
       }
 
-      $owners = null === $caller_hero_id ? [] : $this->record_owners( $family_id, $records );
-      $write  = [];
+      $owners  = null === $caller_hero_id ? [] : $this->record_owners( $family_id, $records );
+      $holders = $this->turn_holders( $family_id, $records );
+      $write   = [];
       foreach ( $records as $r ) {
-        $owner = $owners[ $r['store'] . "\0" . $r['key'] ] ?? null;
+        $owner = $owners[ self::owner_name( $r['store'], $r['key'] ) ] ?? null;
         if ( null !== $owner && $owner !== $caller_hero_id ) {
-          $refused[] = [
-            'store'   => (string) $r['store'],
-            'key'     => (string) $r['key'],
-            'code'    => 'xp_family_scope',
-            'message' => 'That record belongs to another hero.',
-          ];
+          $refused[] = self::refusal( $r, 'xp_family_scope', 'That record belongs to another hero.' );
+          continue;
+        }
+        if ( self::is_hero_record( $r ) && ( $holders[ (string) ( $r['hero_id'] ?? '' ) ] ?? null ) !== $device_id ) {
+          $refused[] = self::refusal( $r, 'xp_family_turn', 'Another device is playing this hero.' );
           continue;
         }
         $write[] = $r;
@@ -601,12 +609,20 @@ class Xophz_Compass_Xp_Family_Store {
           return new WP_Error( 'xp_family_busy', 'The family is busy. Send again in a moment.', [ 'status' => 503 ] );
         }
 
+        $played = [];
         foreach ( $write as $i => $r ) {
           $seq = $first + $i;
           if ( false === $this->put_record( $family_id, $device_id, $r, $seq, $now ) ) {
             continue;
           }
           $accepted[] = [ 'store' => (string) $r['store'], 'key' => (string) $r['key'], 'seq' => $seq ];
+          if ( self::is_hero_record( $r ) ) {
+            $played[ (string) $r['hero_id'] ] = true;
+          }
+        }
+
+        foreach ( array_keys( $played ) as $hero_id ) {
+          $this->touch_turn( $family_id, (string) $hero_id, $device_id, $now );
         }
       }
     } finally {
@@ -656,7 +672,7 @@ class Xophz_Compass_Xp_Family_Store {
     $pairs = [];
     $args  = [ $family_id ];
     foreach ( $records as $r ) {
-      $name = $r['store'] . "\0" . $r['key'];
+      $name = self::owner_name( $r['store'], $r['key'] );
       if ( isset( $pairs[ $name ] ) ) {
         continue;
       }
@@ -674,10 +690,61 @@ class Xophz_Compass_Xp_Family_Store {
 
     $owners = [];
     foreach ( is_array( $rows ) ? $rows : [] as $row ) {
-      $owners[ $row['store'] . "\0" . $row['record_key'] ] = isset( $row['hero_id'] ) ? (string) $row['hero_id'] : null;
+      $owners[ self::owner_name( $row['store'], $row['record_key'] ) ] = isset( $row['hero_id'] ) ? (string) $row['hero_id'] : null;
     }
 
     return $owners;
+  }
+
+  /** The name a record goes by in the owners map: MySQL reads 'k ' and 'k' as the same key. */
+  private static function owner_name( $store, $key ): string {
+    return $store . "\0" . rtrim( (string) $key, ' ' );
+  }
+
+  /** Whether a clean record belongs to a hero: its store is a hero-scope store. */
+  private static function is_hero_record( array $r ): bool {
+    $def = Xophz_Compass_Xp_Family_Record_Rules::STORES[ $r['store'] ] ?? null;
+
+    return null !== $def && 'hero' === $def['scope'];
+  }
+
+  /** A refused record's entry in the answer. */
+  private static function refusal( array $r, string $code, string $message ): array {
+    return [ 'store' => (string) $r['store'], 'key' => (string) $r['key'], 'code' => $code, 'message' => $message ];
+  }
+
+  /**
+   * The device that holds the turn of each hero a batch writes: hero id => device id (null when
+   * nobody does). A hero that is not there or was removed is not in the map. No query when the
+   * batch holds no hero record.
+   */
+  private function turn_holders( string $family_id, array $records ): array {
+    $heroes = [];
+    foreach ( $records as $r ) {
+      if ( self::is_hero_record( $r ) && isset( $r['hero_id'] ) ) {
+        $heroes[ (string) $r['hero_id'] ] = true;
+      }
+    }
+    if ( [] === $heroes ) {
+      return [];
+    }
+
+    $heroes = array_map( 'strval', array_keys( $heroes ) );
+    $marks  = implode( ', ', array_fill( 0, count( $heroes ), '%s' ) );
+    $rows   = $this->db->get_results(
+      $this->db->prepare(
+        "SELECT hero_id, turn_device_id FROM {$this->t( 'xp_family_heroes' )} WHERE family_id = %s AND removed_at IS NULL AND hero_id IN ({$marks})",
+        array_merge( [ $family_id ], $heroes )
+      ),
+      ARRAY_A
+    );
+
+    $holders = [];
+    foreach ( is_array( $rows ) ? $rows : [] as $row ) {
+      $holders[ (string) $row['hero_id'] ] = isset( $row['turn_device_id'] ) ? (string) $row['turn_device_id'] : null;
+    }
+
+    return $holders;
   }
 
   /**
@@ -710,16 +777,34 @@ class Xophz_Compass_Xp_Family_Store {
   /**
    * Take a hero's play turn for a device. One conditional UPDATE decides, so two devices asking
    * at the same moment cannot both be granted: it writes the turn (device, label, now) only when
-   * nobody holds it, this device already does, or the asker forces it.
+   * nobody holds it, this device already does, or the asker forces it. It runs under the
+   * family's lock, the one upsert_records holds while it checks the turn and writes: a takeover
+   * waits for a batch of the old holder in flight, and no batch of the old holder lands after it.
    *
    * @param string $label What the busy line names; cut to the column's 60 characters.
    * @return array|WP_Error [ 'answer' => 'granted' ]; [ 'answer' => 'busy', 'device' => [ 'label',
    *                        'last_seen_at' (ISO) ] ] when another device holds it and force is
    *                        false; [ 'answer' => 'missing' ] when the hero is not there or was
-   *                        removed; 503 xp_family_busy when the write failed or the turn was
-   *                        given back between the write and the read (ask again).
+   *                        removed; 503 xp_family_busy when the lock could not be taken, the
+   *                        write failed, or the turn was given back between the write and the
+   *                        read (ask again).
    */
   public function take_turn( string $family_id, string $hero_id, string $device_id, string $label, bool $force, int $now ) {
+    $lock = 'xp_family_' . $family_id;
+    $got  = $this->db->get_var( $this->db->prepare( 'SELECT GET_LOCK(%s, %d)', $lock, self::LOCK_WAIT ) );
+    if ( '1' !== (string) $got ) {
+      return new WP_Error( 'xp_family_busy', 'The family is busy. Ask again in a moment.', [ 'status' => 503 ] );
+    }
+
+    try {
+      return $this->take_turn_locked( $family_id, $hero_id, $device_id, $label, $force, $now );
+    } finally {
+      $this->db->get_var( $this->db->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+    }
+  }
+
+  /** take_turn with the family's lock held. */
+  private function take_turn_locked( string $family_id, string $hero_id, string $device_id, string $label, bool $force, int $now ) {
     $at      = self::db_time( $now );
     $changed = $this->db->query( $this->db->prepare(
       "UPDATE {$this->t( 'xp_family_heroes' )}

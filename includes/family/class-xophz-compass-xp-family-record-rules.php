@@ -58,7 +58,7 @@ class Xophz_Compass_Xp_Family_Record_Rules {
   const MAX_BATCH       = 50;
   /** Bytes of the records in one request. */
   const MAX_BATCH_BYTES = 1048576;
-  /** Characters of a record key (the column is varchar(191)). */
+  /** Characters of a record key (the column is varchar(191)); a key has no white space at either end. */
   const MAX_KEY         = 191;
 
   /** The error codes of a refused record. */
@@ -95,8 +95,10 @@ class Xophz_Compass_Xp_Family_Record_Rules {
     }
     $def = self::STORES[ $store ];
 
+    // No white space at either end: MySQL compares a key without its trailing spaces, so
+    // 'ql-sib ' would reach the row 'ql-sib' while looking like a different key.
     $key = $raw['key'] ?? null;
-    if ( ! is_string( $key ) || '' === $key || ! mb_check_encoding( $key, 'UTF-8' ) || mb_strlen( $key, 'UTF-8' ) > self::MAX_KEY ) {
+    if ( ! is_string( $key ) || '' === $key || $key !== trim( $key ) || ! mb_check_encoding( $key, 'UTF-8' ) || mb_strlen( $key, 'UTF-8' ) > self::MAX_KEY ) {
       return self::INVALID;
     }
 

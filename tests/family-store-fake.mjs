@@ -5,7 +5,9 @@
  * unknown statement throws, so a changed query fails a test instead of passing unseen. Like MySQL
  * it hands every value back as a string, counts only changed rows for an UPDATE, and gives the
  * records table a primary key on (family_id, seq) beside the unique (family_id, store, record_key).
- * The named lock is a flag on the stand-in, and any write to the records or the counter while the
+ * Record keys compare the way MySQL compares a utf8mb4_bin column (PAD SPACE): 'k' and 'k ' are the
+ * same key, and an upsert keeps the key the row was first written with. The named lock is a flag on
+ * the stand-in, and any write to the records, the counter or a hero's turn by take_turn while the
  * family's lock is not held is noted in $outside_lock.
  */
 
@@ -15,6 +17,7 @@ const PLUGIN = '/var/www/html/wp-content/plugins/xophz-compass-xp';
 
 export const FAKE_DB = `
 require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-rules.php';
+require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-record-rules.php';
 require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-store.php';
 if ( ! defined( 'ARRAY_A' ) ) { define( 'ARRAY_A', 'ARRAY_A' ); }
 
@@ -49,7 +52,7 @@ class FakeFamilyDb {
   }
 
   public function add_record( $family, $store, $key, $seq, $hero = null, $body = '{}', $deleted = 0 ) {
-    $this->records[ $family . '|' . $store . '|' . $key ] = [
+    $this->records[ $family . '|' . $store . '|' . rtrim( $key, ' ' ) ] = [
       'seq' => $seq, 'family_id' => $family, 'store' => $store, 'record_key' => $key, 'hero_id' => $hero,
       'device_id' => 'olddevice0000001', 'saved_at' => '2026-10-01 00:00:00', 'deleted' => $deleted, 'body' => $body,
     ];
@@ -115,7 +118,7 @@ class FakeFamilyDb {
     if ( preg_match( '/^SELECT store, record_key, hero_id FROM wp_xp_family_records WHERE family_id = %s AND \\( \\( store = %s AND record_key = %s \\)( OR \\( store = %s AND record_key = %s \\))* \\)$/', $sql ) ) {
       $found = [];
       for ( $i = 1; $i < count( $a ); $i += 2 ) {
-        $row = $this->records[ $a[0] . '|' . $a[ $i ] . '|' . $a[ $i + 1 ] ] ?? null;
+        $row = $this->records[ $a[0] . '|' . $a[ $i ] . '|' . rtrim( $a[ $i + 1 ], ' ' ) ] ?? null;
         if ( null !== $row ) {
           $found[] = $this->text( [ 'store' => $row['store'], 'record_key' => $row['record_key'], 'hero_id' => $row['hero_id'] ] );
         }
@@ -134,7 +137,7 @@ class FakeFamilyDb {
 
       if ( (string) $key === (string) $this->fail_key ) { return false; }
 
-      $own = $family . '|' . $store . '|' . $key;
+      $own = $family . '|' . $store . '|' . rtrim( $key, ' ' );
       foreach ( $this->records as $name => $row ) {
         if ( $row['family_id'] === $family && (int) $row['seq'] === (int) $seq && $name !== $own ) {
           throw new RuntimeException( 'PRIMARY KEY collision on (' . $family . ', ' . $seq . ')' );
@@ -144,6 +147,7 @@ class FakeFamilyDb {
       $new    = [ 'seq' => (int) $seq, 'family_id' => $family, 'store' => $store, 'record_key' => $key, 'hero_id' => $hero,
         'device_id' => $device, 'saved_at' => $saved, 'deleted' => (int) $deleted, 'body' => $body ];
       $exists = isset( $this->records[ $own ] );
+      if ( $exists ) { $new['record_key'] = $this->records[ $own ]['record_key']; }
       $this->records[ $own ] = $new;
       return $exists ? 2 : 1;
     }
@@ -163,11 +167,21 @@ class FakeFamilyDb {
       $h = $this->heroes[ $a[0] . '|' . $a[1] ] ?? null;
       return ( null === $h || null !== $h['removed_at'] ) ? null : $h['turn_device_id'];
     }
+    if ( preg_match( '/^SELECT hero_id, turn_device_id FROM wp_xp_family_heroes WHERE family_id = %s AND removed_at IS NULL AND hero_id IN \\(%s(, %s)*\\)$/', $sql ) ) {
+      $this->guard( $a[0], $sql );
+      $found = [];
+      foreach ( array_slice( $a, 1 ) as $hero ) {
+        $h = $this->heroes[ $a[0] . '|' . $hero ] ?? null;
+        if ( null !== $h && null === $h['removed_at'] ) { $found[] = $this->text( [ 'hero_id' => $h['hero_id'], 'turn_device_id' => $h['turn_device_id'] ] ); }
+      }
+      return $found;
+    }
     if ( 'SELECT * FROM wp_xp_family_heroes WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL' === $sql ) {
       $h = $this->heroes[ $a[0] . '|' . $a[1] ] ?? null;
       return ( null === $h || null !== $h['removed_at'] ) ? null : $this->text( $h );
     }
     if ( 'UPDATE wp_xp_family_heroes SET turn_device_id = %s, turn_label = %s, turn_taken_at = %s, turn_seen_at = %s WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL AND ( %d = 1 OR turn_device_id IS NULL OR turn_device_id = %s )' === $sql ) {
+      $this->guard( $a[4], $sql );
       if ( $this->fail_turn_update ) { return false; }
       $k = $a[4] . '|' . $a[5];
       $h = $this->heroes[ $k ] ?? null;
@@ -222,16 +236,9 @@ class FakeFamilyDb {
       $this->devices[ (int) $a[1] ]['revoked_at'] = $a[0];
       return 1;
     }
-    if ( "UPDATE wp_xp_family_heroes SET turn_device_id = NULL, turn_label = '', turn_taken_at = NULL, turn_seen_at = NULL WHERE family_id = %s AND turn_device_id = ( SELECT device_id FROM wp_xp_family_devices WHERE id = %d AND family_id = %s )" === $sql ) {
-      $d = $this->devices[ (int) $a[1] ] ?? null;
-      $n = 0;
-      foreach ( $this->heroes as $name => $h ) {
-        if ( null !== $d && $d['family_id'] === $a[2] && $h['family_id'] === $a[0] && $h['turn_device_id'] === $d['device_id'] ) {
-          $this->heroes[ $name ] = array_merge( $h, [ 'turn_device_id' => null, 'turn_label' => '', 'turn_taken_at' => null, 'turn_seen_at' => null ] );
-          $n++;
-        }
-      }
-      return $n;
+    if ( 'SELECT hero_id, device_id FROM wp_xp_family_devices WHERE id = %d AND family_id = %s' === $sql ) {
+      $d = $this->devices[ (int) $a[0] ] ?? null;
+      return ( null === $d || $d['family_id'] !== $a[1] ) ? null : $this->text( [ 'hero_id' => $d['hero_id'], 'device_id' => $d['device_id'] ] );
     }
 
     throw new RuntimeException( 'unexpected SQL: ' . $sql );

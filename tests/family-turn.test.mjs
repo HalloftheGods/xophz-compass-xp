@@ -37,6 +37,9 @@ function run(setup, call) {
       'result' => is_wp_error( $result ) ? [ 'error' => $result->get_error_code(), 'status' => $result->get_error_data()['status'] ] : $result,
       'heroes' => $db->heroes,
       'log'    => array_column( $db->log, 'sql' ),
+      'args'   => array_column( $db->log, 'args' ),
+      'locks'  => array_keys( $db->locks ),
+      'outside' => $db->outside_lock,
     ] );`);
 }
 
@@ -97,6 +100,37 @@ describe('Hero turn: taking it', () => {
     assert.strictEqual(updates.length, 1);
     assert.ok(updates[0].includes('AND ( %d = 1 OR turn_device_id IS NULL OR turn_device_id = %s )'), updates[0]);
     assert.ok(updates[0].includes('removed_at IS NULL'), updates[0]);
+  });
+
+  it('takes the turn under the family lock, the one a records write holds, and lets go of it', () => {
+    // A forced take must not land between a records batch checking the turn and writing its rows.
+    const res = run('', take('h-1', MIA, 'Mia'));
+    assert.ok(res.log[0].startsWith('SELECT GET_LOCK('), res.log[0]);
+    assert.deepStrictEqual(res.args[0], ['xp_family_fam-1', 5]);
+    assert.ok(res.log[res.log.length - 1].startsWith('SELECT RELEASE_LOCK('));
+    assert.strictEqual(res.log.filter((sql) => sql.startsWith('UPDATE wp_xp_family_heroes SET turn_device_id = %s')).length, 1);
+    assert.deepStrictEqual(res.outside, [], 'the write happens inside the lock');
+    assert.deepStrictEqual(res.locks, []);
+  });
+
+  it('lets go of the lock on every answer: granted, busy, missing and the failed write', () => {
+    const answers = run(`${held('h-1', MIA, 'Mia', NOW - 60, NOW - 60)} $db->add_hero( 'fam-1', 'h-3', [ 'removed_at' => '2026-10-02 00:00:00' ] ); $db->add_hero( 'fam-1', 'h-4' );`, `
+      $result = [
+        $store->take_turn( 'fam-1', 'h-1', '${TABLET}', 'tablet', false, ${NOW} ),
+        $store->take_turn( 'fam-1', 'h-3', '${TABLET}', 'tablet', false, ${NOW} ),
+        $store->take_turn( 'fam-1', 'h-2', '${TABLET}', 'tablet', false, ${NOW} ),
+      ];
+      $db->fail_turn_update = true;
+      $result[] = $store->take_turn( 'fam-1', 'h-4', '${DAD}', 'dad', false, ${NOW} ) instanceof WP_Error;`);
+    assert.deepStrictEqual(answers.result.map((r) => r.answer ?? r), ['busy', 'missing', 'granted', true]);
+    assert.deepStrictEqual(answers.locks, []);
+  });
+
+  it('answers 503 xp_family_busy and changes nothing when the family lock is not had', () => {
+    const res = run(held('h-1', MIA, 'Mia', NOW - 60, NOW - 60), `$db->lock_free = false; ${take('h-1', TABLET, 'the family tablet', true)}`);
+    assert.deepStrictEqual(res.result, { error: 'xp_family_busy', status: 503 });
+    assert.strictEqual(turnOf(res, 'h-1').device, MIA);
+    assert.strictEqual(res.log.length, 1, 'only the lock was asked for');
   });
 
   it('never grants on a write that failed', () => {
@@ -183,6 +217,13 @@ describe('Hero turn: a revoked phone and a removed hero', () => {
     assert.strictEqual(res.result, true);
     assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
     assert.strictEqual(turnOf(res, 'h-2').device, DAD, 'another phone\'s turn stays');
+  });
+
+  it('revoking a phone clears only the turn of its own hero, not another hero the same device id holds', () => {
+    const res = run(`${PHONES} ${held('h-1', MIA, 'Mia', NOW - 60, NOW - 60)} ${held('h-2', MIA, 'Mia too', NOW - 60, NOW - 60)}`, `$result = $store->revoke_device( 'fam-1', 31 );`);
+    assert.strictEqual(res.result, true);
+    assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
+    assert.deepStrictEqual(turnOf(res, 'h-2'), { device: MIA, label: 'Mia too', taken: stamp(NOW - 60), seen: stamp(NOW - 60) });
   });
 
   it('revoking a device that holds nothing leaves the turns as they are', () => {

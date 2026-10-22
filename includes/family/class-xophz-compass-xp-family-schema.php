@@ -15,7 +15,7 @@
 class Xophz_Compass_Xp_Family_Schema {
 
   /** The schema version. Raise it when a table changes; maybe_install then runs dbDelta once. */
-  const VERSION      = '1';
+  const VERSION      = '2';
   const OPTION       = 'xp_family_db_version';
   const CLEANUP_HOOK = 'xp_family_cleanup';
 
@@ -26,6 +26,8 @@ class Xophz_Compass_Xp_Family_Schema {
   const EVENT_DAYS  = 90;
   /** Days a revoked phone's row is kept. */
   const DEVICE_DAYS = 30;
+  /** Days a tombstone (a removed record) is kept, counted from when it was written. */
+  const TOMBSTONE_DAYS = 90;
 
   private $plugin_name;
   private $version;
@@ -54,6 +56,7 @@ class Xophz_Compass_Xp_Family_Schema {
     $devices  = "{$prefix}xp_family_devices";
     $codes    = "{$prefix}xp_family_link_codes";
     $events   = "{$prefix}xp_family_events";
+    $records  = "{$prefix}xp_family_records";
 
     return [
       $families => "CREATE TABLE {$families} (
@@ -62,6 +65,7 @@ class Xophz_Compass_Xp_Family_Schema {
   home_device_id varchar(16) NOT NULL,
   created_at datetime NOT NULL,
   updated_at datetime NOT NULL,
+  records_seq bigint(20) unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY  (family_id),
   UNIQUE KEY owner_user_id (owner_user_id)
 ) {$charset};",
@@ -75,6 +79,10 @@ class Xophz_Compass_Xp_Family_Schema {
   card_at datetime DEFAULT NULL,
   created_at datetime NOT NULL,
   removed_at datetime DEFAULT NULL,
+  turn_device_id varchar(16) DEFAULT NULL,
+  turn_label varchar(60) NOT NULL DEFAULT '',
+  turn_taken_at datetime DEFAULT NULL,
+  turn_seen_at datetime DEFAULT NULL,
   PRIMARY KEY  (family_id,hero_id)
 ) {$charset};",
 
@@ -120,6 +128,22 @@ class Xophz_Compass_Xp_Family_Schema {
   UNIQUE KEY event_id (event_id),
   KEY family_seq (family_id,seq),
   KEY received_at (received_at)
+) {$charset};",
+
+      $records  => "CREATE TABLE {$records} (
+  seq bigint(20) unsigned NOT NULL,
+  family_id char(36) NOT NULL,
+  store varchar(40) NOT NULL,
+  record_key varchar(191) NOT NULL,
+  hero_id varchar(64) DEFAULT NULL,
+  device_id varchar(16) NOT NULL,
+  saved_at datetime NOT NULL,
+  deleted tinyint(1) NOT NULL DEFAULT 0,
+  body mediumtext NOT NULL,
+  PRIMARY KEY  (seq),
+  UNIQUE KEY family_store_key (family_id,store,record_key),
+  KEY family_seq (family_id,seq),
+  KEY family_hero_seq (family_id,hero_id,seq)
 ) {$charset};",
     ];
   }
@@ -175,8 +199,9 @@ class Xophz_Compass_Xp_Family_Schema {
   }
 
   /**
-   * Daily: delete events received more than 90 days ago, link codes past their expiry and
-   * devices revoked more than 30 days ago.
+   * Daily: delete events received more than 90 days ago, link codes past their expiry,
+   * devices revoked more than 30 days ago and tombstones written more than 90 days ago.
+   * Live records are never aged out: they are the family's save.
    */
   public function cleanup(): void {
     if ( ! self::is_family_site() ) {
@@ -199,6 +224,11 @@ class Xophz_Compass_Xp_Family_Schema {
     $wpdb->query( $wpdb->prepare(
       "DELETE FROM {$wpdb->prefix}xp_family_devices WHERE revoked_at IS NOT NULL AND revoked_at < %s",
       gmdate( 'Y-m-d H:i:s', $now - self::DEVICE_DAYS * 86400 )
+    ) );
+
+    $wpdb->query( $wpdb->prepare(
+      "DELETE FROM {$wpdb->prefix}xp_family_records WHERE deleted = 1 AND saved_at < %s",
+      gmdate( 'Y-m-d H:i:s', $now - self::TOMBSTONE_DAYS * 86400 )
     ) );
   }
 }

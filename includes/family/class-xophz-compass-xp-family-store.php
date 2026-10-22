@@ -3,7 +3,7 @@
 /**
  * The family store of Do It For The XP: the rows of the family tables on a family site.
  *
- * Every read and write of the five family tables goes through here, with the site's own
+ * Every read and write of the six family tables goes through here, with the site's own
  * prefix. It decides nothing: the routes ask the rule classes first, then call the store.
  * Times are stored as UTC datetimes.
  *
@@ -13,7 +13,7 @@
 
 class Xophz_Compass_Xp_Family_Store {
 
-  /** Seconds to wait for a family's lock (GET_LOCK) before an append gives up. */
+  /** Seconds to wait for a family's lock (GET_LOCK) before an append or a records write gives up. */
   const LOCK_WAIT = 5;
 
   /** @var wpdb */
@@ -125,14 +125,16 @@ class Xophz_Compass_Xp_Family_Store {
   }
 
   /**
-   * Remove a hero: marked removed, card cleared, every phone of the hero revoked and its
-   * unused link codes deleted. Removing a hero that is not there changes nothing.
+   * Remove a hero: marked removed, card cleared, the turn it was held on given back, every phone
+   * of the hero revoked and its unused link codes deleted. Removing a hero that is not there
+   * changes nothing.
    */
   public function remove_hero( string $family_id, string $hero_id ): void {
     $now = self::db_time( time() );
 
     $this->db->query( $this->db->prepare(
-      "UPDATE {$this->t( 'xp_family_heroes' )} SET removed_at = %s, card = NULL, card_at = NULL
+      "UPDATE {$this->t( 'xp_family_heroes' )}
+       SET removed_at = %s, card = NULL, card_at = NULL, turn_device_id = NULL, turn_label = '', turn_taken_at = NULL, turn_seen_at = NULL
        WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL",
       $now,
       $family_id,
@@ -328,19 +330,35 @@ class Xophz_Compass_Xp_Family_Store {
   }
 
   /**
-   * Unlink a phone of this family. A phone of another family is never touched.
+   * Unlink a phone of this family, and give back any hero's turn it held. A phone of another
+   * family is never touched; a phone that was already revoked clears nothing (its device id may
+   * hold a turn again by now).
    *
    * @return bool Whether a linked phone was revoked now.
    */
   public function revoke_device( string $family_id, int $id ): bool {
+    $devices = $this->t( 'xp_family_devices' );
+
     $done = $this->db->query( $this->db->prepare(
-      "UPDATE {$this->t( 'xp_family_devices' )} SET revoked_at = %s WHERE id = %d AND family_id = %s AND revoked_at IS NULL",
+      "UPDATE {$devices} SET revoked_at = %s WHERE id = %d AND family_id = %s AND revoked_at IS NULL",
       self::db_time( time() ),
       $id,
       $family_id
     ) );
+    if ( 1 !== (int) $done ) {
+      return false;
+    }
 
-    return 1 === (int) $done;
+    $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_heroes' )}
+       SET turn_device_id = NULL, turn_label = '', turn_taken_at = NULL, turn_seen_at = NULL
+       WHERE family_id = %s AND turn_device_id = ( SELECT device_id FROM {$devices} WHERE id = %d AND family_id = %s )",
+      $family_id,
+      $id,
+      $family_id
+    ) );
+
+    return true;
   }
 
   /** Note that a phone called, at most once a minute. */
@@ -503,6 +521,277 @@ class Xophz_Compass_Xp_Family_Store {
     }
 
     return [ 'family' => $family, 'by_hero' => $by_hero ];
+  }
+
+  // --- the family's save: records ---------------------------------------------------------------
+
+  /**
+   * Write checked records (the clean records of Record_Rules::check) into the family's save.
+   *
+   * Runs under the family's named lock, the one append_events takes. Under it the counter
+   * (xp_families.records_seq) is read, the accepted records get the next numbers in order, the
+   * counter moves past them, and each record is upserted: an existing key is overwritten and
+   * takes the new number, so a reader asking for "after N" never misses a change. The counter
+   * moves before the rows are written, so a crash in between leaves a gap in the numbers and
+   * never a number given twice. A body is stored exactly as it came (the JSON text); a
+   * tombstone stores an empty one.
+   *
+   * A hero key ($caller_hero_id) may not touch a row that already belongs to another hero,
+   * live write or tombstone: such a record is refused with xp_family_scope and takes no number.
+   * A row that belongs to nobody (chat) stays open to it, and a parent is never restricted.
+   * The turn is not checked here: the caller asks turn_holder() first.
+   *
+   * A record that could not be written is in neither list, so the device sends it again.
+   *
+   * @param string      $family_id
+   * @param string      $device_id      The device that sends the batch.
+   * @param array       $records        Clean records: store, key, hero_id, deleted, body.
+   * @param int         $now            Unix time of the write.
+   * @param string|null $caller_hero_id The hero of the key when a hero phone sends the batch.
+   * @return array|WP_Error [ 'accepted' => [ [ store, key, seq ] ], 'refused' => [ [ store, key,
+   *                        code, message ] ] ], both in the order the records came in; 503
+   *                        xp_family_busy when the lock could not be taken; 404
+   *                        xp_family_no_family when the family is not there.
+   */
+  public function upsert_records( string $family_id, string $device_id, array $records, int $now, ?string $caller_hero_id = null ) {
+    if ( [] === $records ) {
+      return [ 'accepted' => [], 'refused' => [] ];
+    }
+
+    $lock = 'xp_family_' . $family_id;
+    $got  = $this->db->get_var( $this->db->prepare( 'SELECT GET_LOCK(%s, %d)', $lock, self::LOCK_WAIT ) );
+    if ( '1' !== (string) $got ) {
+      return new WP_Error( 'xp_family_busy', 'The family is busy. Send again in a moment.', [ 'status' => 503 ] );
+    }
+
+    $accepted = [];
+    $refused  = [];
+
+    try {
+      $families = $this->t( 'xp_families' );
+      $counter  = $this->db->get_var( $this->db->prepare( "SELECT records_seq FROM {$families} WHERE family_id = %s FOR UPDATE", $family_id ) );
+      if ( null === $counter ) {
+        return new WP_Error( 'xp_family_no_family', 'There is no such family.', [ 'status' => 404 ] );
+      }
+
+      $owners = null === $caller_hero_id ? [] : $this->record_owners( $family_id, $records );
+      $write  = [];
+      foreach ( $records as $r ) {
+        $owner = $owners[ $r['store'] . "\0" . $r['key'] ] ?? null;
+        if ( null !== $owner && $owner !== $caller_hero_id ) {
+          $refused[] = [
+            'store'   => (string) $r['store'],
+            'key'     => (string) $r['key'],
+            'code'    => 'xp_family_scope',
+            'message' => 'That record belongs to another hero.',
+          ];
+          continue;
+        }
+        $write[] = $r;
+      }
+
+      if ( [] !== $write ) {
+        $first    = (int) $counter + 1;
+        $reserved = $this->db->query( $this->db->prepare(
+          "UPDATE {$families} SET records_seq = %d WHERE family_id = %s",
+          (int) $counter + count( $write ),
+          $family_id
+        ) );
+        if ( false === $reserved ) {
+          return new WP_Error( 'xp_family_busy', 'The family is busy. Send again in a moment.', [ 'status' => 503 ] );
+        }
+
+        foreach ( $write as $i => $r ) {
+          $seq = $first + $i;
+          if ( false === $this->put_record( $family_id, $device_id, $r, $seq, $now ) ) {
+            continue;
+          }
+          $accepted[] = [ 'store' => (string) $r['store'], 'key' => (string) $r['key'], 'seq' => $seq ];
+        }
+      }
+    } finally {
+      $this->db->get_var( $this->db->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+    }
+
+    return [ 'accepted' => $accepted, 'refused' => $refused ];
+  }
+
+  /**
+   * The family's records after a number, oldest first (the rows as stored: the body is the JSON
+   * text, a tombstone has deleted = 1 and an empty body).
+   *
+   * @param string|null $hero_id For a hero key: only what that hero may read (the family's
+   *                             records and that hero's own), so a page is never filled with rows
+   *                             the caller cannot see.
+   */
+  public function records_after( string $family_id, int $since, int $limit, ?string $hero_id = null ): array {
+    $records = $this->t( 'xp_family_records' );
+
+    $sql = null === $hero_id
+      ? $this->db->prepare(
+        "SELECT * FROM {$records} WHERE family_id = %s AND seq > %d ORDER BY seq ASC LIMIT %d",
+        $family_id,
+        max( 0, $since ),
+        max( 1, $limit )
+      )
+      : $this->db->prepare(
+        "SELECT * FROM {$records} WHERE family_id = %s AND seq > %d AND ( hero_id IS NULL OR hero_id = %s ) ORDER BY seq ASC LIMIT %d",
+        $family_id,
+        max( 0, $since ),
+        $hero_id,
+        max( 1, $limit )
+      );
+
+    $rows = $this->db->get_results( $sql, ARRAY_A );
+
+    return is_array( $rows ) ? $rows : [];
+  }
+
+  /**
+   * The hero each of these records' keys belongs to now, read once for the batch: store,
+   * NUL and key => hero id, or null for a row that belongs to nobody. A key with no row is
+   * not in the map.
+   */
+  private function record_owners( string $family_id, array $records ): array {
+    $pairs = [];
+    $args  = [ $family_id ];
+    foreach ( $records as $r ) {
+      $name = $r['store'] . "\0" . $r['key'];
+      if ( isset( $pairs[ $name ] ) ) {
+        continue;
+      }
+      $pairs[ $name ] = '( store = %s AND record_key = %s )';
+      array_push( $args, (string) $r['store'], (string) $r['key'] );
+    }
+
+    $rows = $this->db->get_results(
+      $this->db->prepare(
+        "SELECT store, record_key, hero_id FROM {$this->t( 'xp_family_records' )} WHERE family_id = %s AND ( " . implode( ' OR ', $pairs ) . ' )',
+        $args
+      ),
+      ARRAY_A
+    );
+
+    $owners = [];
+    foreach ( is_array( $rows ) ? $rows : [] as $row ) {
+      $owners[ $row['store'] . "\0" . $row['record_key'] ] = isset( $row['hero_id'] ) ? (string) $row['hero_id'] : null;
+    }
+
+    return $owners;
+  }
+
+  /**
+   * Upsert one clean record under its number. A family record's hero id is a real NULL (a NULL
+   * argument would be written as an empty string).
+   *
+   * @return int|bool What the query answered: false when the row was not written.
+   */
+  private function put_record( string $family_id, string $device_id, array $r, int $seq, int $now ) {
+    $hero = $r['hero_id'] ?? null;
+    $gone = ! empty( $r['deleted'] );
+    $args = [ $seq, $family_id, (string) $r['store'], (string) $r['key'] ];
+    if ( null !== $hero ) {
+      $args[] = (string) $hero;
+    }
+    array_push( $args, $device_id, self::db_time( $now ), $gone ? 1 : 0, $gone ? '' : (string) ( $r['body'] ?? '' ) );
+    $hero_sql = null === $hero ? 'NULL' : '%s';
+
+    return $this->db->query( $this->db->prepare(
+      "INSERT INTO {$this->t( 'xp_family_records' )} (seq, family_id, store, record_key, hero_id, device_id, saved_at, deleted, body)
+       VALUES (%d, %s, %s, %s, {$hero_sql}, %s, %s, %d, %s)
+       ON DUPLICATE KEY UPDATE seq = VALUES(seq), hero_id = VALUES(hero_id), device_id = VALUES(device_id),
+       saved_at = VALUES(saved_at), deleted = VALUES(deleted), body = VALUES(body)",
+      $args
+    ) );
+  }
+
+  // --- a hero's turn ---------------------------------------------------------------------------
+
+  /**
+   * Take a hero's play turn for a device. One conditional UPDATE decides, so two devices asking
+   * at the same moment cannot both be granted: it writes the turn (device, label, now) only when
+   * nobody holds it, this device already does, or the asker forces it.
+   *
+   * @param string $label What the busy line names; cut to the column's 60 characters.
+   * @return array|WP_Error [ 'answer' => 'granted' ]; [ 'answer' => 'busy', 'device' => [ 'label',
+   *                        'last_seen_at' (ISO) ] ] when another device holds it and force is
+   *                        false; [ 'answer' => 'missing' ] when the hero is not there or was
+   *                        removed; 503 xp_family_busy when the write failed or the turn was
+   *                        given back between the write and the read (ask again).
+   */
+  public function take_turn( string $family_id, string $hero_id, string $device_id, string $label, bool $force, int $now ) {
+    $at      = self::db_time( $now );
+    $changed = $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_heroes' )}
+       SET turn_device_id = %s, turn_label = %s, turn_taken_at = %s, turn_seen_at = %s
+       WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL
+       AND ( %d = 1 OR turn_device_id IS NULL OR turn_device_id = %s )",
+      $device_id,
+      mb_substr( $label, 0, Xophz_Compass_Xp_Family_Rules::LABEL_MAX, 'UTF-8' ),
+      $at,
+      $at,
+      $family_id,
+      $hero_id,
+      $force ? 1 : 0,
+      $device_id
+    ) );
+    if ( 1 === (int) $changed ) {
+      return [ 'answer' => 'granted' ];
+    }
+
+    // Nothing changed: the hero is gone, someone else holds the turn, or this device holds it
+    // already and every column came out the same (the same label in the same second).
+    $row = $this->hero( $family_id, $hero_id );
+    if ( null === $row ) {
+      return [ 'answer' => 'missing' ];
+    }
+
+    $holder = (string) ( $row['turn_device_id'] ?? '' );
+    if ( $holder === $device_id ) {
+      return [ 'answer' => 'granted' ];
+    }
+    if ( '' === $holder ) {
+      return new WP_Error( 'xp_family_busy', 'The turn could not be taken. Ask again in a moment.', [ 'status' => 503 ] );
+    }
+
+    return [
+      'answer' => 'busy',
+      'device' => [ 'label' => (string) $row['turn_label'], 'last_seen_at' => self::iso( $row['turn_seen_at'] ?? null ) ],
+    ];
+  }
+
+  /** Give a hero's turn back, only when this device holds it (a late rest cannot clear a new holder). */
+  public function rest_turn( string $family_id, string $hero_id, string $device_id ): void {
+    $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_heroes' )}
+       SET turn_device_id = NULL, turn_label = '', turn_taken_at = NULL, turn_seen_at = NULL
+       WHERE family_id = %s AND hero_id = %s AND turn_device_id = %s",
+      $family_id,
+      $hero_id,
+      $device_id
+    ) );
+  }
+
+  /** Note that the holder is still playing: refreshes last seen, only when this device holds the turn. */
+  public function touch_turn( string $family_id, string $hero_id, string $device_id, int $now ): void {
+    $this->db->query( $this->db->prepare(
+      "UPDATE {$this->t( 'xp_family_heroes' )} SET turn_seen_at = %s WHERE family_id = %s AND hero_id = %s AND turn_device_id = %s",
+      self::db_time( $now ),
+      $family_id,
+      $hero_id,
+      $device_id
+    ) );
+  }
+
+  /** The device that holds a live hero's turn, or null when nobody does (or the hero is not there). */
+  public function turn_holder( string $family_id, string $hero_id ): ?string {
+    $holder = $this->db->get_var( $this->db->prepare(
+      "SELECT turn_device_id FROM {$this->t( 'xp_family_heroes' )} WHERE family_id = %s AND hero_id = %s AND removed_at IS NULL",
+      $family_id,
+      $hero_id
+    ) );
+
+    return is_string( $holder ) && '' !== $holder ? $holder : null;
   }
 
   /** A family table's full name on this site. */

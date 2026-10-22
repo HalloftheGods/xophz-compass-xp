@@ -10,6 +10,7 @@ import './family-event-rules.test.mjs';
 import './family-two-phone-events.test.mjs';
 import './family-schema.test.mjs';
 import './family-records.test.mjs';
+import './family-turn.test.mjs';
 import './town-hall-membership.test.mjs';
 
 const results = await harness.run();

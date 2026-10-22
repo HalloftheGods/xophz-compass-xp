@@ -180,6 +180,23 @@ describe('Family event rules: filter_data', () => {
     ]);
     assert.deepStrictEqual(res, [{}, { note: 'hi', n: 3 }, {}]);
   });
+
+  it('quest.claimed keeps synced as a bool', () => {
+    const claim = { questId: 'q-1', difficulty: 2, requiresApproval: true };
+    const res = filters([
+      ['quest.claimed', { ...claim, synced: true }],
+      ['quest.claimed', { ...claim, synced: false }],
+      ['quest.claimed', { ...claim, synced: 'yes' }],
+      ['quest.claimed', { ...claim, synced: 1 }],
+      ['quest.claimed', claim],
+    ]);
+    assert.deepStrictEqual(res, [
+      { ...claim, synced: true }, { ...claim, synced: false }, claim, claim, claim,
+    ]);
+    const ok = check(wireEvent({ kind: 'quest.claimed', data: { ...claim, synced: true, name: 'Dishes' } }));
+    assert.strictEqual(ok.ok, true, JSON.stringify(ok));
+    assert.deepStrictEqual(ok.event.data, { ...claim, synced: true });
+  });
 });
 
 describe('Family event rules: check_event', () => {

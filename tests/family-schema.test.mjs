@@ -1,5 +1,5 @@
 /**
- * Family schema (MP3): the five tables, installing them on a family site only, and the
+ * Family schema (MP3, schema 2): the six tables, installing them on a family site only, and the
  * daily cleanup. WordPress is stubbed inside each snippet; the owner's database is not touched.
  */
 
@@ -41,7 +41,7 @@ class Fake_Wpdb {
 $wpdb = new Fake_Wpdb();
 `;
 
-const NAMES = ['wp_5_xp_families', 'wp_5_xp_family_heroes', 'wp_5_xp_family_devices', 'wp_5_xp_family_link_codes', 'wp_5_xp_family_events'];
+const NAMES = ['wp_5_xp_families', 'wp_5_xp_family_heroes', 'wp_5_xp_family_devices', 'wp_5_xp_family_link_codes', 'wp_5_xp_family_events', 'wp_5_xp_family_records'];
 
 function tables() {
   return runPhpJson(`${SCHEMA} echo json_encode( ${CLS}::tables( 'wp_5_', 'DEFAULT CHARSET=utf8mb4' ) );`);
@@ -66,7 +66,7 @@ function column(sql, name) {
 describe('Family schema: constants and hooks', () => {
   it('holds the version, option and cleanup hook of the spec', () => {
     const res = runPhpJson(`${SCHEMA} echo json_encode( [ ${CLS}::VERSION, ${CLS}::OPTION, ${CLS}::CLEANUP_HOOK ] );`);
-    assert.deepStrictEqual(res, ['1', 'xp_family_db_version', 'xp_family_cleanup']);
+    assert.deepStrictEqual(res, ['2', 'xp_family_db_version', 'xp_family_cleanup']);
   });
 
   it('installs on init at priority 5 and cleans up on the daily hook', () => {
@@ -78,7 +78,7 @@ describe('Family schema: constants and hooks', () => {
 });
 
 describe('Family schema: tables', () => {
-  it('has the five tables, named with the prefix', () => {
+  it('has the family tables, named with the prefix', () => {
     assert.deepStrictEqual(Object.keys(tables()), NAMES);
   });
 
@@ -98,7 +98,7 @@ describe('Family schema: tables', () => {
 
   it('xp_families: family id primary key, one family per owner', () => {
     const sql = tables()['wp_5_xp_families'];
-    assert.deepStrictEqual(columns(sql), ['family_id', 'owner_user_id', 'home_device_id', 'created_at', 'updated_at']);
+    assert.deepStrictEqual(columns(sql), ['family_id', 'owner_user_id', 'home_device_id', 'created_at', 'updated_at', 'records_seq']);
     assert.ok(column(sql, 'family_id').startsWith('family_id char(36) NOT NULL'));
     assert.ok(column(sql, 'owner_user_id').startsWith('owner_user_id bigint(20) unsigned NOT NULL'));
     assert.ok(column(sql, 'home_device_id').startsWith('home_device_id varchar(16) NOT NULL'));
@@ -108,7 +108,7 @@ describe('Family schema: tables', () => {
 
   it('xp_family_heroes: primary key on family and hero', () => {
     const sql = tables()['wp_5_xp_family_heroes'];
-    assert.deepStrictEqual(columns(sql), ['family_id', 'hero_id', 'nickname', 'age_group', 'card', 'card_at', 'created_at', 'removed_at']);
+    assert.deepStrictEqual(columns(sql), ['family_id', 'hero_id', 'nickname', 'age_group', 'card', 'card_at', 'created_at', 'removed_at', 'turn_device_id', 'turn_label', 'turn_taken_at', 'turn_seen_at']);
     assert.ok(sql.includes('PRIMARY KEY  (family_id,hero_id)'));
     assert.ok(column(sql, 'hero_id').startsWith('hero_id varchar(64) NOT NULL'));
     assert.ok(column(sql, 'nickname').startsWith('nickname varchar(40) NOT NULL'));
@@ -156,9 +156,49 @@ describe('Family schema: tables', () => {
     assert.ok(sql.includes('KEY received_at (received_at)'));
   });
 
+  it('version 2 declares six tables, records with its three keys', () => {
+    const [version, sql] = runPhpJson(`${SCHEMA} echo json_encode( [ ${CLS}::VERSION, ${CLS}::tables( 'wp_5_', 'DEFAULT CHARSET=utf8mb4' ) ] );`);
+    assert.strictEqual(version, '2');
+    assert.strictEqual(Object.values(sql).filter((statement) => statement.startsWith('CREATE TABLE ')).length, 6);
+
+    const records = sql['wp_5_xp_family_records'];
+    assert.ok(records, 'the records table is declared');
+    assert.deepStrictEqual(columns(records), ['seq', 'family_id', 'store', 'record_key', 'hero_id', 'device_id', 'saved_at', 'deleted', 'body']);
+    assert.ok(column(records, 'seq').startsWith('seq bigint(20) unsigned NOT NULL'));
+    assert.ok(!column(records, 'seq').includes('AUTO_INCREMENT'), 'the store numbers the rows, not MySQL');
+    assert.ok(column(records, 'family_id').startsWith('family_id char(36) NOT NULL'));
+    assert.ok(column(records, 'store').startsWith('store varchar(40) NOT NULL'));
+    assert.ok(column(records, 'record_key').startsWith('record_key varchar(191) COLLATE utf8mb4_bin NOT NULL'), 'keys differing only by case never collide');
+    assert.ok(column(records, 'hero_id').startsWith('hero_id varchar(64) DEFAULT NULL'));
+    assert.ok(column(records, 'device_id').startsWith('device_id varchar(16) NOT NULL'));
+    assert.ok(column(records, 'saved_at').startsWith('saved_at datetime NOT NULL'));
+    assert.ok(column(records, 'deleted').startsWith('deleted tinyint(1) NOT NULL DEFAULT 0'));
+    assert.ok(column(records, 'body').startsWith('body mediumtext'));
+    // The number counts per family, so the primary key is the family and the number: two families
+    // both have a record 1, and a key on seq alone would let one family's upsert hit the other's row.
+    assert.ok(records.includes('PRIMARY KEY  (family_id,seq)'));
+    assert.ok(!records.includes('PRIMARY KEY  (seq)'));
+    assert.ok(records.includes('UNIQUE KEY family_store_key (family_id,store,record_key)'));
+    assert.ok(records.includes('KEY family_hero_seq (family_id,hero_id,seq)'));
+    assert.ok(records.includes('KEY tombstone_age (deleted,saved_at)'), 'the cleanup finds old tombstones by index');
+    assert.ok(!records.includes('KEY family_seq'), 'the primary key already is the family and number index');
+  });
+
+  it('families carry records_seq and heroes the four turn columns', () => {
+    const sql = tables();
+    const families = sql['wp_5_xp_families'];
+    assert.ok(column(families, 'records_seq').startsWith('records_seq bigint(20) unsigned NOT NULL DEFAULT 0'));
+
+    const heroes = sql['wp_5_xp_family_heroes'];
+    assert.ok(column(heroes, 'turn_device_id').startsWith('turn_device_id varchar(16) DEFAULT NULL'));
+    assert.ok(column(heroes, 'turn_label').startsWith("turn_label varchar(60) NOT NULL DEFAULT ''"));
+    assert.ok(column(heroes, 'turn_taken_at').startsWith('turn_taken_at datetime DEFAULT NULL'));
+    assert.ok(column(heroes, 'turn_seen_at').startsWith('turn_seen_at datetime DEFAULT NULL'));
+  });
+
   it('follows the prefix and charset it is given', () => {
     const res = runPhpJson(`${SCHEMA} echo json_encode( ${CLS}::tables( 'x_', 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci' ) );`);
-    assert.deepStrictEqual(Object.keys(res), ['x_xp_families', 'x_xp_family_heroes', 'x_xp_family_devices', 'x_xp_family_link_codes', 'x_xp_family_events']);
+    assert.deepStrictEqual(Object.keys(res), ['x_xp_families', 'x_xp_family_heroes', 'x_xp_family_devices', 'x_xp_family_link_codes', 'x_xp_family_events', 'x_xp_family_records']);
     for (const sql of Object.values(res)) {
       assert.ok(sql.endsWith(') DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci;'));
     }
@@ -177,9 +217,9 @@ describe('Family schema: install', () => {
       echo json_encode( [ 'delta' => $GLOBALS['t']['delta'], 'cron' => $GLOBALS['t']['cron'] ] );`);
   }
 
-  it('on a family site it creates the five tables and schedules the daily cleanup', () => {
+  it('on a family site it creates the six tables and schedules the daily cleanup', () => {
     const res = install();
-    assert.strictEqual(res.delta.length, 5);
+    assert.strictEqual(res.delta.length, 6);
     assert.deepStrictEqual(res.delta.map((sql) => sql.match(/^CREATE TABLE (\S+)/)[1]), NAMES);
     assert.deepStrictEqual(res.cron, [['daily', 'xp_family_cleanup', true]]);
   });
@@ -193,13 +233,13 @@ describe('Family schema: install', () => {
 
   it('does not schedule the cleanup twice', () => {
     const res = install({ scheduled: 1800000000 });
-    assert.strictEqual(res.delta.length, 5);
+    assert.strictEqual(res.delta.length, 6);
     assert.deepStrictEqual(res.cron, []);
   });
 
   it('asks the Town Hall class for its list of sites when it exists', () => {
     const before = "class Xophz_Compass_Xp_Town_Hall { const DEFAULT_SITE_URLS = [ 'https://rehearsal.test' ]; }";
-    assert.strictEqual(install({ home: 'https://rehearsal.test/', before }).delta.length, 5);
+    assert.strictEqual(install({ home: 'https://rehearsal.test/', before }).delta.length, 6);
     assert.deepStrictEqual(install({ home: 'https://doit.forthexp.com/', before }), { delta: [], cron: [] });
   });
 });
@@ -218,9 +258,9 @@ describe('Family schema: cleanup', () => {
 
   const seconds = (stamp) => Date.parse(`${stamp.replace(' ', 'T')}Z`) / 1000;
 
-  it('deletes events older than 90 days, expired codes and devices revoked over 30 days ago', () => {
+  it('deletes events older than 90 days, expired codes, devices revoked over 30 days ago and (a fourth delete) old tombstones', () => {
     const res = cleanup();
-    assert.strictEqual(res.queries.length, 3);
+    assert.strictEqual(res.queries.length, 4);
     const day = 86400;
 
     const events = res.queries[0].match(/^DELETE FROM wp_5_xp_family_events WHERE received_at < '([\d: -]{19})'$/);
@@ -234,6 +274,18 @@ describe('Family schema: cleanup', () => {
     const devices = res.queries[2].match(/^DELETE FROM wp_5_xp_family_devices WHERE revoked_at IS NOT NULL AND revoked_at < '([\d: -]{19})'$/);
     assert.ok(devices, res.queries[2]);
     assert.ok(seconds(devices[1]) >= res.before - 30 * day && seconds(devices[1]) <= res.after - 30 * day);
+  });
+
+  it('cleanup deletes tombstones older than 90 days', () => {
+    const res = cleanup();
+    const day = 86400;
+    assert.strictEqual(runPhpJson(`${SCHEMA} echo json_encode( ${CLS}::TOMBSTONE_DAYS );`), 90);
+
+    const tombstones = res.queries.filter((sql) => sql.startsWith('DELETE FROM wp_5_xp_family_records '));
+    assert.strictEqual(tombstones.length, 1, 'one delete on the records table');
+    const match = tombstones[0].match(/^DELETE FROM wp_5_xp_family_records WHERE deleted = 1 AND saved_at < '([\d: -]{19})'$/);
+    assert.ok(match, tombstones[0]);
+    assert.ok(seconds(match[1]) >= res.before - 90 * day && seconds(match[1]) <= res.after - 90 * day);
   });
 
   it('touches nothing on a site that is not a family site', () => {

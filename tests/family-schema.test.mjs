@@ -168,16 +168,20 @@ describe('Family schema: tables', () => {
     assert.ok(!column(records, 'seq').includes('AUTO_INCREMENT'), 'the store numbers the rows, not MySQL');
     assert.ok(column(records, 'family_id').startsWith('family_id char(36) NOT NULL'));
     assert.ok(column(records, 'store').startsWith('store varchar(40) NOT NULL'));
-    assert.ok(column(records, 'record_key').startsWith('record_key varchar(191) NOT NULL'));
+    assert.ok(column(records, 'record_key').startsWith('record_key varchar(191) COLLATE utf8mb4_bin NOT NULL'), 'keys differing only by case never collide');
     assert.ok(column(records, 'hero_id').startsWith('hero_id varchar(64) DEFAULT NULL'));
     assert.ok(column(records, 'device_id').startsWith('device_id varchar(16) NOT NULL'));
     assert.ok(column(records, 'saved_at').startsWith('saved_at datetime NOT NULL'));
     assert.ok(column(records, 'deleted').startsWith('deleted tinyint(1) NOT NULL DEFAULT 0'));
     assert.ok(column(records, 'body').startsWith('body mediumtext'));
-    assert.ok(records.includes('PRIMARY KEY  (seq)'));
+    // The number counts per family, so the primary key is the family and the number: two families
+    // both have a record 1, and a key on seq alone would let one family's upsert hit the other's row.
+    assert.ok(records.includes('PRIMARY KEY  (family_id,seq)'));
+    assert.ok(!records.includes('PRIMARY KEY  (seq)'));
     assert.ok(records.includes('UNIQUE KEY family_store_key (family_id,store,record_key)'));
-    assert.ok(records.includes('KEY family_seq (family_id,seq)'));
     assert.ok(records.includes('KEY family_hero_seq (family_id,hero_id,seq)'));
+    assert.ok(records.includes('KEY tombstone_age (deleted,saved_at)'), 'the cleanup finds old tombstones by index');
+    assert.ok(!records.includes('KEY family_seq'), 'the primary key already is the family and number index');
   });
 
   it('families carry records_seq and heroes the four turn columns', () => {
@@ -254,7 +258,7 @@ describe('Family schema: cleanup', () => {
 
   const seconds = (stamp) => Date.parse(`${stamp.replace(' ', 'T')}Z`) / 1000;
 
-  it('deletes events older than 90 days, expired codes and devices revoked over 30 days ago', () => {
+  it('deletes events older than 90 days, expired codes, devices revoked over 30 days ago and (a fourth delete) old tombstones', () => {
     const res = cleanup();
     assert.strictEqual(res.queries.length, 4);
     const day = 86400;

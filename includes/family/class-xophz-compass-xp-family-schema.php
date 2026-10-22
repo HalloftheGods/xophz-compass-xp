@@ -134,16 +134,16 @@ class Xophz_Compass_Xp_Family_Schema {
   seq bigint(20) unsigned NOT NULL,
   family_id char(36) NOT NULL,
   store varchar(40) NOT NULL,
-  record_key varchar(191) NOT NULL,
+  record_key varchar(191) COLLATE utf8mb4_bin NOT NULL,
   hero_id varchar(64) DEFAULT NULL,
   device_id varchar(16) NOT NULL,
   saved_at datetime NOT NULL,
   deleted tinyint(1) NOT NULL DEFAULT 0,
   body mediumtext NOT NULL,
-  PRIMARY KEY  (seq),
+  PRIMARY KEY  (family_id,seq),
   UNIQUE KEY family_store_key (family_id,store,record_key),
-  KEY family_seq (family_id,seq),
-  KEY family_hero_seq (family_id,hero_id,seq)
+  KEY family_hero_seq (family_id,hero_id,seq),
+  KEY tombstone_age (deleted,saved_at)
 ) {$charset};",
     ];
   }

@@ -18,6 +18,9 @@
 
 class Xophz_Compass_Xp_Family_Records {
 
+  /** What the busy line calls a parent device that sent no label of its own. */
+  const PARENT_LABEL = 'the family device';
+
   /** What a record refused by the record rules is told, by the code it was refused with. */
   private const REFUSALS = [
     Xophz_Compass_Xp_Family_Record_Rules::STORE_UNKNOWN => 'That store is not part of the family save.',
@@ -92,8 +95,14 @@ class Xophz_Compass_Xp_Family_Records {
 
   /**
    * The family's records after the number since, oldest first, at most limit, only those the
-   * caller may read: a parent reads all; a hero key reads the family's records and its own
-   * hero's (never a sibling's).
+   * caller may read: a parent reads all; a hero key reads the family's records, every chat row
+   * and its own hero's records (never a sibling's).
+   *
+   * A page also ends before the row that would take the bodies past 1 MB (always one row at
+   * least), so a few big records cannot swell a page to the 100 MB that 200 rows of 512 KB would
+   * make. The caller's cursor is the last number returned, so paging needs nothing new. The store
+   * reads the sizes first and fetches only the bodies of the page (see Store::records_after), so
+   * the cap holds in memory too, not only in the answer.
    *
    * Reading is how a holder shows it is still there: the heroes whose turn the caller's device
    * holds get their last seen refreshed (one query finds them). A hero key reads as its phone; a
@@ -119,7 +128,13 @@ class Xophz_Compass_Xp_Family_Records {
     }
 
     $ctx  = [ 'writer' => $who['writer'], 'key_hero_id' => $who['hero_id'] ];
-    $rows = $store->records_after( $family_id, $since, $limit, 'hero' === $who['writer'] ? $who['hero_id'] : null );
+    $rows = $store->records_after(
+      $family_id,
+      $since,
+      $limit,
+      'hero' === $who['writer'] ? $who['hero_id'] : null,
+      Xophz_Compass_Xp_Family_Record_Rules::MAX_BATCH_BYTES
+    );
     $out  = [];
     foreach ( $rows as $row ) {
       if ( Xophz_Compass_Xp_Family_Record_Rules::may_read( $row, $ctx ) ) {
@@ -138,7 +153,10 @@ class Xophz_Compass_Xp_Family_Records {
    * Take a hero's turn for the caller's device (see Family_Store::take_turn).
    *
    * @param string $hero_id The hero, from the path of the route.
-   * @param string $label   What the busy line names: cleaned as a phone's label is, up to 60 characters.
+   * @param string $label   What the busy line names, for a parent device: cleaned, up to 60 characters,
+   *                        "the family device" when empty. A hero key is named by the label its phone
+   *                        was linked with, and this one is ignored: a kid phone cannot pass itself
+   *                        off as the family tablet.
    * @param bool   $force   Take the turn from the device that holds it.
    * @return array|WP_Error [ 'answer' => 'granted' ] or [ 'answer' => 'busy', 'device' => [ 'label',
    *                        'last_seen_at' ] ]; 404 xp_family_no_hero for a hero that is not there; 403
@@ -159,7 +177,10 @@ class Xophz_Compass_Xp_Family_Records {
       return $refused;
     }
 
-    $answer = $store->take_turn( $family_id, $hero_id, $who['device_id'], Xophz_Compass_Xp_Family_Rules::device_label( $label ), $force, $now );
+    $named  = 'hero' === $who['writer']
+      ? Xophz_Compass_Xp_Family_Rules::device_label( $caller['device']['label'] ?? '' )
+      : Xophz_Compass_Xp_Family_Rules::device_label( $label, self::PARENT_LABEL );
+    $answer = $store->take_turn( $family_id, $hero_id, $who['device_id'], $named, $force, $now );
     if ( is_wp_error( $answer ) ) {
       return $answer;
     }

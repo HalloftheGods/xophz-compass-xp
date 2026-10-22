@@ -588,8 +588,9 @@ class Xophz_Compass_Xp_Family_Rest {
 
   /**
    * GET /records?since=&limit=&device_id= -> [ { seq, store, key, hero_id, device_id, saved_at, deleted, body } ]
-   * (see Xophz_Compass_Xp_Family_Records::read): limit 100 by default, at most 200. A parent adds
-   * the device it reads for, so that the turn it holds shows as seen.
+   * (see Xophz_Compass_Xp_Family_Records::read): limit 100 by default, at most 200, and a page ends
+   * before the row that would take its bodies past 1 MB, so a client continues from the last seq it
+   * got. A parent adds the device it reads for, so that the turn it holds shows as seen.
    */
   public function read_records( WP_REST_Request $r ) {
     $caller = $this->guard( $r, 'read_records' );
@@ -618,7 +619,8 @@ class Xophz_Compass_Xp_Family_Rest {
 
   /**
    * POST /heroes/{hero_id}/play { device_id, label, force } -> { answer: granted } or
-   * { answer: busy, device: { label, last_seen_at } } (see Xophz_Compass_Xp_Family_Records::play)
+   * { answer: busy, device: { label, last_seen_at } } (see Xophz_Compass_Xp_Family_Records::play).
+   * A hero key plays as its phone, under the label it was linked with; label is a parent device's.
    */
   public function play( WP_REST_Request $r ) {
     $caller = $this->guard( $r, 'play' );

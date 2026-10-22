@@ -263,7 +263,7 @@ describe('Hero turn: a revoked phone and a removed hero', () => {
 describe('Hero turn: the play and rest routes', () => {
   const PAID = { 'fam-1': { status: 'active', expires_at: null, plan: 'lifetime' } };
   const PARENT_CALLER = { kind: 'parent', user_id: 7 };
-  const kid = (heroId = 'h-1', device = MIA) => ({ kind: 'hero', device: { id: 31, family_id: 'fam-1', hero_id: heroId, device_id: device } });
+  const kid = (heroId = 'h-1', device = MIA, label = "Mia's iPhone") => ({ kind: 'hero', device: { id: 31, family_id: 'fam-1', hero_id: heroId, device_id: device, label } });
   const lit = (value) => `json_decode(<<<'JSON'\n${JSON.stringify(value)}\nJSON\n, true)`;
 
   const DUMP = `echo json_encode( [
@@ -350,13 +350,31 @@ describe('Hero turn: the play and rest routes', () => {
     assert.deepStrictEqual(other.log, [], 'refused before the database is asked');
   });
 
-  it('play cleans the label: tags go, it is cut to 60 characters, and an empty one gets a default', () => {
+  it('play cleans a parent device\'s label: tags go, it is cut to 60 characters, and an empty one is "the family device"', () => {
     const tagged = play('h-1', TABLET, '<b>Dad\'s</b>   <script>alert(1)</script>tablet');
     assert.strictEqual(turnOf(tagged, 'h-1').label, "Dad's alert(1)tablet");
     const long = play('h-1', TABLET, 'x'.repeat(80));
     assert.strictEqual(turnOf(long, 'h-1').label, 'x'.repeat(60));
-    const empty = play('h-1', TABLET, '   ');
-    assert.strictEqual(turnOf(empty, 'h-1').label, 'A hero phone');
+    for (const empty of ['   ', '', '<b></b>']) {
+      assert.strictEqual(turnOf(play('h-1', TABLET, empty), 'h-1').label, 'the family device', JSON.stringify(empty));
+    }
+  });
+
+  it('a hero key\'s busy-line label is the one its phone was linked with, never the one in the request', () => {
+    const own = play('h-1', DAD, 'the family tablet', { caller: kid('h-1', MIA, "Mia's iPhone") });
+    assert.deepStrictEqual(own.result, { answer: 'granted' });
+    assert.strictEqual(turnOf(own, 'h-1').label, "Mia's iPhone", 'a kid phone cannot pass itself off as the family tablet');
+
+    const forced = play('h-1', DAD, 'the family tablet', { caller: kid('h-1', MIA, 'Mia <b>phone</b>'), force: true, setup: held('h-1', TABLET, 'the family tablet', NOW - 60, NOW - 60) });
+    assert.strictEqual(turnOf(forced, 'h-1').label, 'Mia phone', 'the linked label is cleaned like any other');
+
+    const after = route(`
+      Xophz_Compass_Xp_Family_Records::play( $store, $family, ${lit(kid('h-1', MIA, "Mia's iPhone"))}, 'h-1', '${DAD}', 'the family tablet', false, ${NOW} );
+      $result = Xophz_Compass_Xp_Family_Records::play( $store, $family, ${lit(PARENT_CALLER)}, 'h-1', '${TABLET}', 'the family tablet', false, ${NOW} );`);
+    assert.deepStrictEqual(after.result, { answer: 'busy', device: { label: "Mia's iPhone", last_seen_at: iso(NOW) } }, 'what the parent is told');
+
+    const unnamed = play('h-1', MIA, 'whatever', { caller: kid('h-1', MIA, '') });
+    assert.strictEqual(turnOf(unnamed, 'h-1').label, 'A hero phone', 'a phone linked without a label gets the phone default');
   });
 
   it('play and rest refuse a device id or a hero id of the wrong shape with 400', () => {
@@ -421,6 +439,13 @@ describe('Hero turn: the play and rest routes', () => {
       assert.deepStrictEqual(res.result, { answer: 'rested' });
       assert.deepStrictEqual(turnOf(res, 'h-1'), FREE);
       assert.strictEqual(turnOf(res, 'h-2').device, TABLET, 'the other hero keeps its turn');
+    });
+
+    it('POST /heroes/{id}/play from a hero key uses the linked label, not the body\'s', () => {
+      const res = route(PLAY, { who: kid('h-1', MIA, "Mia's iPhone"), request: asks({ device_id: TABLET, label: 'the family tablet' }) });
+      assert.deepStrictEqual(res.result, { answer: 'granted' });
+      const turn = turnOf(res, 'h-1');
+      assert.deepStrictEqual([turn.device, turn.label], [MIA, "Mia's iPhone"], 'the device and label are the key\'s; the handler stamps the real clock');
     });
 
     it('a hero key is held to the hero of the path, not to a hero_id in the body', () => {

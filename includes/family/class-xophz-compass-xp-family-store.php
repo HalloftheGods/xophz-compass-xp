@@ -536,9 +536,10 @@ class Xophz_Compass_Xp_Family_Store {
    * never a number given twice. A body is stored exactly as it came (the JSON text); a
    * tombstone stores an empty one.
    *
-   * A hero key ($caller_hero_id) may not touch a row that already belongs to another hero,
-   * live write or tombstone: such a record is refused with xp_family_scope and takes no number.
-   * A row that belongs to nobody (chat) stays open to it, and a parent is never restricted.
+   * A hero key ($caller_hero_id) may not touch a row that already belongs to someone else,
+   * live write or tombstone: a row of another hero, or of nobody (a Game Master's chat message,
+   * whose hero_id is NULL), is refused with xp_family_scope and takes no number. A key with no
+   * row yet is free, and a row of its own hero it may rewrite. A parent is never restricted.
    * Keys are compared without their trailing spaces, as MySQL compares them.
    *
    * The turn is checked here, under the lock, and the routes rely on it (they do not check it
@@ -586,9 +587,9 @@ class Xophz_Compass_Xp_Family_Store {
       $holders = $this->turn_holders( $family_id, $records );
       $write   = [];
       foreach ( $records as $r ) {
-        $owner = $owners[ self::owner_name( $r['store'], $r['key'] ) ] ?? null;
-        if ( null !== $owner && $owner !== $caller_hero_id ) {
-          $refused[] = self::refusal( $r, 'xp_family_scope', 'That record belongs to another hero.' );
+        $name = self::owner_name( $r['store'], $r['key'] );
+        if ( array_key_exists( $name, $owners ) && $owners[ $name ] !== $caller_hero_id ) {
+          $refused[] = self::refusal( $r, 'xp_family_scope', 'That record belongs to someone else.' );
           continue;
         }
         if ( self::is_hero_record( $r ) && ( $holders[ (string) ( $r['hero_id'] ?? '' ) ] ?? null ) !== $device_id ) {
@@ -636,29 +637,66 @@ class Xophz_Compass_Xp_Family_Store {
    * The family's records after a number, oldest first (the rows as stored: the body is the JSON
    * text, a tombstone has deleted = 1 and an empty body).
    *
-   * @param string|null $hero_id For a hero key: only what that hero may read (the family's
-   *                             records and that hero's own), so a page is never filled with rows
-   *                             the caller cannot see.
+   * @param string|null $hero_id   For a hero key: only what that hero may read (the family's
+   *                               records, every row of the any-writer stores and that hero's own),
+   *                               so a page is never filled with rows the caller cannot see.
+   * @param int|null    $max_bytes A cap on the bodies of the page. The page ends before the first row
+   *                               that would take the bodies past it, and always holds one row. It is
+   *                               read in two steps so PHP never holds more than a page of bodies: one
+   *                               query reads only the size of each candidate row (at most $limit
+   *                               numbers), then the bodies are fetched up to the last row that
+   *                               fits. A row rewritten in between moves past the page and shows up
+   *                               on a later one; no row is lost, because the next read starts from
+   *                               the last number returned. Null reads $limit rows whatever their size.
    */
-  public function records_after( string $family_id, int $since, int $limit, ?string $hero_id = null ): array {
+  public function records_after( string $family_id, int $since, int $limit, ?string $hero_id = null, ?int $max_bytes = null ): array {
     $records = $this->t( 'xp_family_records' );
+    $since   = max( 0, $since );
+    $limit   = max( 1, $limit );
 
-    $sql = null === $hero_id
-      ? $this->db->prepare(
-        "SELECT * FROM {$records} WHERE family_id = %s AND seq > %d ORDER BY seq ASC LIMIT %d",
-        $family_id,
-        max( 0, $since ),
-        max( 1, $limit )
-      )
-      : $this->db->prepare(
-        "SELECT * FROM {$records} WHERE family_id = %s AND seq > %d AND ( hero_id IS NULL OR hero_id = %s ) ORDER BY seq ASC LIMIT %d",
-        $family_id,
-        max( 0, $since ),
-        $hero_id,
-        max( 1, $limit )
+    $filter = '';
+    $named  = [];
+    if ( null !== $hero_id ) {
+      $stores = Xophz_Compass_Xp_Family_Record_Rules::any_writer_stores();
+      $filter = ' AND ( hero_id IS NULL OR hero_id = %s OR store IN (' . implode( ', ', array_fill( 0, count( $stores ), '%s' ) ) . ') )';
+      $named  = array_merge( [ $hero_id ], $stores );
+    }
+
+    $upto = '';
+    $stop = [];
+    if ( null !== $max_bytes ) {
+      $sizes = $this->db->get_results(
+        $this->db->prepare(
+          "SELECT seq, LENGTH(body) AS size FROM {$records} WHERE family_id = %s AND seq > %d{$filter} ORDER BY seq ASC LIMIT %d",
+          array_merge( [ $family_id, $since ], $named, [ $limit ] )
+        ),
+        ARRAY_A
       );
 
-    $rows = $this->db->get_results( $sql, ARRAY_A );
+      $last  = null;
+      $total = 0;
+      foreach ( is_array( $sizes ) ? $sizes : [] as $row ) {
+        if ( null !== $last && $total + (int) $row['size'] > $max_bytes ) {
+          break;
+        }
+        $total += (int) $row['size'];
+        $last   = (int) $row['seq'];
+      }
+      if ( null === $last ) {
+        return [];
+      }
+
+      $upto = ' AND seq <= %d';
+      $stop = [ $last ];
+    }
+
+    $rows = $this->db->get_results(
+      $this->db->prepare(
+        "SELECT * FROM {$records} WHERE family_id = %s AND seq > %d{$upto}{$filter} ORDER BY seq ASC LIMIT %d",
+        array_merge( [ $family_id, $since ], $stop, $named, [ $limit ] )
+      ),
+      ARRAY_A
+    );
 
     return is_array( $rows ) ? $rows : [];
   }

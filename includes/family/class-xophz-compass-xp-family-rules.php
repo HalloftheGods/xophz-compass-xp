@@ -116,16 +116,23 @@ class Xophz_Compass_Xp_Family_Rules {
     return mb_strlen( $clean, 'UTF-8' ) <= self::NICKNAME_MAX ? $clean : null;
   }
 
-  /** A label for a hero phone, cut to 60 characters; an empty one becomes "A hero phone". */
-  public static function device_label( $raw ): string {
-    $clean = self::squish( $raw );
+  /**
+   * A label for a device, cut to 60 characters; one with no text becomes $default ("A hero
+   * phone" unless the caller names another).
+   *
+   * @param mixed       $raw     Whatever the request carried.
+   * @param string|null $default The label for a device that has none.
+   */
+  public static function device_label( $raw, ?string $default = null ): string {
+    $default = $default ?? self::DEFAULT_LABEL;
+    $clean   = self::squish( $raw );
     if ( null === $clean || '' === $clean ) {
-      return self::DEFAULT_LABEL;
+      return $default;
     }
 
     $clean = trim( mb_substr( $clean, 0, self::LABEL_MAX, 'UTF-8' ) );
 
-    return '' === $clean ? self::DEFAULT_LABEL : $clean;
+    return '' === $clean ? $default : $clean;
   }
 
   /** @param mixed $v */

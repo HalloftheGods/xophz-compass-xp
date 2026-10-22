@@ -291,8 +291,28 @@ describe('Record rules', () => {
       SCOPE, SCOPE, SCOPE, SCOPE, SCOPE,
       SCOPE, SCOPE, SCOPE, SCOPE,
     ]);
-    assert.strictEqual(res[7].hero_id, null);
+    assert.strictEqual(res[7].hero_id, 'h-1', 'a hero key\'s chat record is stamped with the key\'s hero');
     assert.strictEqual(res[0].hero_id, 'h-1');
+  });
+
+  it('a hero key\'s chat record, live or removed, carries the key\'s hero whatever the wire says; a parent\'s carries none', () => {
+    const res = checks([
+      [sample('__chat'), heroKey('h-1')],
+      [sample('__chat', { hero_id: 'h-2' }), heroKey('h-1')],
+      [sample('__chat', { hero_id: 'h-1' }), heroKey('h-2')],
+      [tomb('__chat', 'm-1'), heroKey('h-2')],
+      [tomb('__chat', 'm-1', { hero_id: 'h-1' }), heroKey('h-2')],
+      [sample('__chat'), PARENT],
+      [sample('__chat', { hero_id: 'h-2' }), PARENT],
+      [tomb('__chat', 'm-1'), PARENT],
+    ]);
+    assert.deepStrictEqual(res.map((r) => r.hero_id), ['h-1', 'h-1', 'h-2', 'h-2', 'h-2', null, null, null]);
+    assert.deepStrictEqual(res[0], { store: '__chat', key: 'm-1', hero_id: 'h-1', deleted: false, body: JSON.stringify({ text: 'hello' }) });
+  });
+
+  it('any_writer_stores names the stores any hero key may write: the chat', () => {
+    const stores = runPhpJson(`${RULES} echo json_encode( ${CLS}::any_writer_stores() );`);
+    assert.deepStrictEqual(stores, ['__chat']);
   });
 
   it('a hero key with no hero, or an unknown kind of caller, writes nothing it does not own', () => {
@@ -304,7 +324,7 @@ describe('Record rules', () => {
       [sample('__chat'), {}],
       [sample('__chat'), { writer: 'server' }],
     ]);
-    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), [SCOPE, 'ok', SCOPE, SCOPE, SCOPE, SCOPE]);
+    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), [SCOPE, SCOPE, SCOPE, SCOPE, SCOPE, SCOPE], 'no hero, no chat row to own');
   });
 
   it('a parent may write every store', () => {
@@ -435,7 +455,7 @@ describe('Record rules', () => {
     assert.deepStrictEqual(res, [INVALID, UNKNOWN, INVALID]);
   });
 
-  it('may_read: a hero key reads family stores and its own hero\'s rows only', () => {
+  it('may_read: a hero key reads family stores, every chat row and its own hero\'s rows only', () => {
     const own = heroKey('h-1');
     const res = reads([
       [{ store: '__shops', hero_id: null }, own],
@@ -447,8 +467,11 @@ describe('Record rules', () => {
       [{ hero_id: 'h-2' }, own],
       [{ store: '__profiles', hero_id: 'h-1' }, { writer: 'hero', key_hero_id: null }],
       [{ store: '__shops', hero_id: null }, { writer: 'hero', key_hero_id: null }],
+      [{ store: '__chat', hero_id: 'h-2' }, own],
+      [{ store: '__chat', hero_id: 'h-1' }, own],
+      [{ store: '__chat', hero_id: 'h-2' }, { writer: 'hero', key_hero_id: null }],
     ]);
-    assert.deepStrictEqual(res, [true, true, true, true, false, false, false, false, true]);
+    assert.deepStrictEqual(res, [true, true, true, true, false, false, false, false, true, true, true, true]);
   });
 
   it('may_read: a parent reads every row, and anyone else reads nothing', () => {
@@ -706,10 +729,39 @@ describe('Record store', () => {
       assert.strictEqual(res.counters['fam-1'], 41);
     });
 
-    it('a row nobody owns (chat) stays writable by any hero key', () => {
-      const res = asKid([clean('__chat', 'c-1', '{"text":"edited"}'), gone('__chat', 'c-1')]);
-      assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-1', 'c-1']);
+    const CHAT_SEEDS = `${SEEDS}
+      $db->add_record( 'fam-1', '__chat', 'c-mine', 20, 'h-1', '{"text":"mine"}' );
+      $db->add_record( 'fam-1', '__chat', 'c-sib', 21, 'h-2', '{"text":"sibling"}' );`;
+    /** A chat record as the record rules hand it over for a hero key: stamped with the key's hero. */
+    const said = (key, text = 'hi') => clean('__chat', key, JSON.stringify({ text }), { hero_id: 'h-1' });
+    const unsaid = (key) => gone('__chat', key, { hero_id: 'h-1' });
+
+    it('chat: a hero key creates a row and rewrites or removes its own, and the row keeps its owner', () => {
+      const res = upsert([said('c-new'), said('c-mine', 'edited'), unsaid('c-mine')], { setup: CHAT_SEEDS, caller: 'h-1' });
+      assert.deepStrictEqual(res.result.accepted.map((r) => [r.key, r.seq]), [['c-new', 41], ['c-mine', 42], ['c-mine', 43]]);
       assert.deepStrictEqual(res.result.refused, []);
+      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
+      assert.deepStrictEqual([byKey['c-new'].hero_id, byKey['c-new'].seq], ['h-1', 41]);
+      assert.deepStrictEqual([byKey['c-mine'].hero_id, byKey['c-mine'].deleted], ['h-1', 1]);
+    });
+
+    it('chat: a row of another hero, or of nobody (a Game Master\'s), is refused with xp_family_scope, live or removed', () => {
+      const res = upsert([said('c-sib', 'hijack'), unsaid('c-sib'), said('c-1', 'hijack'), unsaid('c-1'), said('c-mine ', 'padded'), said('c-sib ')], { setup: CHAT_SEEDS, caller: 'h-1' });
+      assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [
+        ['c-sib', 'xp_family_scope'], ['c-sib', 'xp_family_scope'], ['c-1', 'xp_family_scope'], ['c-1', 'xp_family_scope'], ['c-sib ', 'xp_family_scope'],
+      ]);
+      assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-mine ']);
+      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
+      assert.deepStrictEqual([byKey['c-sib'].hero_id, byKey['c-sib'].seq, byKey['c-sib'].deleted], ['h-2', 21, 0], 'the sibling\'s message is untouched');
+      assert.deepStrictEqual([byKey['c-1'].hero_id, byKey['c-1'].seq, byKey['c-1'].deleted], [null, 9, 0], 'a Game Master\'s message is untouched');
+    });
+
+    it('chat: a parent writes any chat row, and a row it writes belongs to nobody', () => {
+      const res = upsert([clean('__chat', 'c-mine', '{"text":"moderated"}'), clean('__chat', 'c-sib', '{"text":"fixed"}'), gone('__chat', 'c-1')], { setup: CHAT_SEEDS, caller: null });
+      assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-mine', 'c-sib', 'c-1']);
+      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
+      assert.strictEqual(byKey['c-mine'].hero_id, null);
+      assert.strictEqual(byKey['c-sib'].hero_id, null);
     });
 
     it('looks the batch\'s keys up once, under the lock and before it numbers anything', () => {
@@ -855,6 +907,7 @@ describe('Record store: records_after', () => {
       $db->add_record( 'fam-1', '__profiles', 'h-1', 5, 'h-1', '{"id":"h-1"}' );
       $db->add_record( 'fam-1', '__profiles', 'h-2', 7, 'h-2', '{"id":"h-2"}' );
       $db->add_record( 'fam-1', '__shops', 's-gone', 13, null, '', 1 );
+      $db->add_record( 'fam-1', '__chat', 'c-2', 15, 'h-2', '{"text":"from h-2"}' );
       $db->add_record( 'fam-2', '__shops', 's-1', 4, null, '{"name":"another family"}' );`;
 
     function after(since, limit, heroId = null) {
@@ -863,31 +916,61 @@ describe('Record store: records_after', () => {
     const seqs = (res) => res.result.map((row) => Number(row.seq));
 
     it('returns the family\'s rows after since, oldest first', () => {
-      assert.deepStrictEqual(seqs(after(4, 100)), [5, 7, 9, 11, 13]);
-      assert.deepStrictEqual(seqs(after(0, 100)), [3, 5, 7, 9, 11, 13]);
-      assert.deepStrictEqual(seqs(after(13, 100)), []);
+      assert.deepStrictEqual(seqs(after(4, 100)), [5, 7, 9, 11, 13, 15]);
+      assert.deepStrictEqual(seqs(after(0, 100)), [3, 5, 7, 9, 11, 13, 15]);
+      assert.deepStrictEqual(seqs(after(15, 100)), []);
     });
 
     it('stops at the limit and keeps the oldest', () => {
       assert.deepStrictEqual(seqs(after(4, 2)), [5, 7]);
       assert.deepStrictEqual(seqs(after(0, 0)), [3], 'a limit under 1 is 1');
-      assert.deepStrictEqual(seqs(after(-9, 100)), [3, 5, 7, 9, 11, 13], 'a negative since is 0');
+      assert.deepStrictEqual(seqs(after(-9, 100)), [3, 5, 7, 9, 11, 13, 15], 'a negative since is 0');
     });
 
-    it('with a hero, returns the family\'s rows and that hero\'s own, never another hero\'s', () => {
-      assert.deepStrictEqual(seqs(after(0, 100, 'h-1')), [3, 5, 9, 11, 13]);
-      assert.deepStrictEqual(seqs(after(0, 100, 'h-2')), [3, 7, 9, 13]);
-      assert.deepStrictEqual(seqs(after(4, 100, 'h-3')), [9, 13]);
-      const sql = after(0, 10, 'h-1').log[0];
-      assert.ok(sql.includes('( hero_id IS NULL OR hero_id = %s )') && sql.includes('ORDER BY seq ASC LIMIT %d'), sql);
+    it('with a hero, returns the family\'s rows, every chat row and that hero\'s own, never another hero\'s', () => {
+      assert.deepStrictEqual(seqs(after(0, 100, 'h-1')), [3, 5, 9, 11, 13, 15]);
+      assert.deepStrictEqual(seqs(after(0, 100, 'h-2')), [3, 7, 9, 13, 15]);
+      assert.deepStrictEqual(seqs(after(4, 100, 'h-3')), [9, 13, 15]);
+      const res = after(0, 10, 'h-1');
+      assert.ok(res.log[0].includes('( hero_id IS NULL OR hero_id = %s OR store IN (%s) )') && res.log[0].includes('ORDER BY seq ASC LIMIT %d'), res.log[0]);
+      assert.deepStrictEqual(res.args[0], ['fam-1', 0, 'h-1', '__chat', 10]);
+    });
+
+    it('with a byte cap, ends the page before the row that would pass it, always keeps one row, and fetches no body beyond the page', () => {
+      const sizes = `
+        $db->add_record( 'fam-1', '__shops', 'a', 21, null, '{"pad":"' . str_repeat( 'a', 499990 ) . '"}' );
+        $db->add_record( 'fam-1', '__shops', 'b', 22, null, '{"pad":"' . str_repeat( 'a', 499990 ) . '"}' );
+        $db->add_record( 'fam-1', '__shops', 'c', 23, null, '{"pad":"' . str_repeat( 'a', 99990 ) . '"}' );
+        $db->add_record( 'fam-1', '__shops', 'd', 24, null, '{}' );`;
+      // Not run(): its dump would send the bodies (over 1 MB) back through the pipe.
+      const page = (since, max) => storeRun(`
+        $db = new FakeFamilyDb();
+        ${sizes}
+        $store  = new Xophz_Compass_Xp_Family_Store( $db );
+        $result = array_map( function ( $r ) { return [ (int) $r['seq'], strlen( $r['body'] ) ]; }, $store->records_after( 'fam-1', ${since}, 100, null, ${max} ) );
+        echo json_encode( [ 'result' => $result, 'log' => array_column( $db->log, 'sql' ), 'args' => array_column( $db->log, 'args' ) ] );`);
+      assert.deepStrictEqual(page(15, 1048576).result, [[21, 500000], [22, 500000]], 'the third would make 1,100,000');
+      assert.deepStrictEqual(page(22, 1048576).result, [[23, 100000], [24, 2]]);
+      assert.deepStrictEqual(page(15, 500000).result, [[21, 500000]], 'a page may be exactly the cap');
+      assert.deepStrictEqual(page(15, 10).result, [[21, 500000]], 'one row is always returned, even over the cap');
+      assert.deepStrictEqual(page(24, 10).result, [], 'nothing after');
+
+      const res = page(15, 1048576);
+      const bodies = res.log.filter((sql) => sql.startsWith('SELECT * FROM wp_xp_family_records'));
+      assert.strictEqual(bodies.length, 1);
+      assert.ok(bodies[0].includes('AND seq <= %d'), bodies[0]);
+      assert.strictEqual(res.log.filter((sql) => sql.startsWith('SELECT seq, LENGTH(body) AS size FROM wp_xp_family_records')).length, 1, 'one query reads only the sizes');
+      const at = res.log.findIndex((sql) => sql.startsWith('SELECT * FROM wp_xp_family_records'));
+      assert.deepStrictEqual(res.args[at], ['fam-1', 15, 22, 100], 'the bodies are fetched up to the last row that fits');
     });
 
     it('hands back the columns of the row with the body as the stored text, a tombstone empty', () => {
       const res = after(12, 100);
-      assert.deepStrictEqual(res.result, [{
+      assert.deepStrictEqual(res.result[0], {
         seq: '13', family_id: 'fam-1', store: '__shops', record_key: 's-gone', hero_id: null,
         device_id: 'olddevice0000001', saved_at: '2026-10-01 00:00:00', deleted: '1', body: '',
-      }]);
+      });
+      assert.deepStrictEqual(res.result.slice(1).map((row) => [row.seq, row.store, row.hero_id]), [['15', '__chat', 'h-2']]);
       assert.strictEqual(after(10, 100).result[0].body, '{"userId":"h-1"}');
     });
   });
@@ -1074,6 +1157,7 @@ describe('Routes: the records class', () => {
       ['ql-sib', 'xp_family_scope'],
     ], 'a family store, another hero, and another hero\'s existing row');
     for (const row of res.rows.filter((r) => r.seq > 40)) assert.strictEqual(row.device_id, KID, 'the key\'s device, not the one in the request');
+    assert.strictEqual(res.rows.find((row) => row.record_key === 'c-1').hero_id, 'h-1', 'its chat message belongs to its hero');
 
     const lost = put([log('ql-1', 'h-1')], { caller: kid('h-1', KID), device: TABLET, setup: holds('h-1', TABLET) });
     assert.deepStrictEqual(lost.result.refused.map((r) => r.code), ['xp_family_turn'], 'a phone cannot borrow the tablet\'s turn by naming its device');
@@ -1131,11 +1215,63 @@ describe('Routes: the records class', () => {
     $db->add_record( 'fam-2', '__shops', 's-1', 4, null, '{"name":"another family"}' );`;
   const seqs = (res) => res.result.map((row) => row.seq);
 
-  it('read filters by the hero key\'s hero and a parent reads everything of the family', () => {
+  it('read filters by the hero key\'s hero, and a parent reads everything of the family', () => {
     assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS })), [3, 5, 7, 9, 11, 13]);
     assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-1') })), [3, 5, 9, 11, 13]);
     assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-2') })), [3, 7, 9, 13]);
     assert.deepStrictEqual(seqs(read(0, 100, { setup: SEEDS, caller: kid('h-3') })), [3, 9, 13]);
+  });
+
+  it('read gives every hero key every chat row, whoever wrote it, and still no other hero\'s record', () => {
+    const sibling = `${SEEDS} $db->add_record( 'fam-1', '__chat', 'c-2', 15, 'h-2', '{"text":"from h-2"}' );`;
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: sibling })), [3, 5, 7, 9, 11, 13, 15]);
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: sibling, caller: kid('h-1') })), [3, 5, 9, 11, 13, 15]);
+    assert.deepStrictEqual(seqs(read(0, 100, { setup: sibling, caller: kid('h-2') })), [3, 7, 9, 13, 15]);
+    const chat = read(14, 100, { setup: sibling, caller: kid('h-1') }).result[0];
+    assert.deepStrictEqual([chat.store, chat.key, chat.hero_id, chat.body], ['__chat', 'c-2', 'h-2', '{"text":"from h-2"}']);
+  });
+
+  /** Read pages until one is empty; each page is a list of [seq, body bytes]. */
+  const pages = (caller, limit = 200) => `
+    $caller = ${lit(caller)};
+    $result = [];
+    $since  = 0;
+    for ( $i = 0; $i < 6; $i++ ) {
+      $page = Xophz_Compass_Xp_Family_Records::read( $store, $family, $caller, $since, ${limit}, '', ${NOW} );
+      $result[] = array_map( function ( $row ) { return [ $row['seq'], strlen( $row['body'] ) ]; }, $page );
+      if ( [] === $page ) { break; }
+      $since = end( $page )['seq'];
+    }`;
+  const padded = (seq, key, bytes, hero = 'null') =>
+    `$db->add_record( 'fam-1', '__chat', '${key}', ${seq}, ${hero}, '{"pad":"' . str_repeat( 'a', ${bytes - 10} ) . '"}' );`;
+
+  it('read ends a page before the row that would take its bodies past 1 MB: three 600 KB rows come one at a time', () => {
+    const res = run(pages(PARENT_CALLER), { setup: `${padded(3, 'a', 600000)} ${padded(5, 'b', 600000)} ${padded(7, 'c', 600000)}` });
+    assert.deepStrictEqual(res.result, [[[3, 600000]], [[5, 600000]], [[7, 600000]], []], 'each next since carries on from the last seq returned');
+  });
+
+  it('read fills a page up to 1 MB of bodies, small rows included, and a hero key is paged the same way', () => {
+    const setup = `${padded(3, 'a', 500000)} ${padded(5, 'b', 500000)} ${padded(7, 'c', 100000)} ${padded(9, 'd', 20)} ${padded(11, 'e', 600000, "'h-2'")}`;
+    const parent = run(pages(PARENT_CALLER), { setup });
+    assert.deepStrictEqual(parent.result, [[[3, 500000], [5, 500000]], [[7, 100000], [9, 20], [11, 600000]], []]);
+    const phone = run(pages(kid('h-1')), { setup });
+    assert.deepStrictEqual(phone.result, [[[3, 500000], [5, 500000]], [[7, 100000], [9, 20], [11, 600000]], []], 'chat is every hero\'s');
+  });
+
+  it('read still honours the count limit, and always returns at least one row, even one over the cap', () => {
+    const counted = run(pages(PARENT_CALLER, 2), { setup: `${padded(3, 'a', 30)} ${padded(5, 'b', 30)} ${padded(7, 'c', 30)}` });
+    assert.deepStrictEqual(counted.result, [[[3, 30], [5, 30]], [[7, 30]], []]);
+    const huge = run(pages(PARENT_CALLER), { setup: `${padded(3, 'a', 1200000)} ${padded(5, 'b', 30)}` });
+    assert.deepStrictEqual(huge.result, [[[3, 1200000]], [[5, 30]], []]);
+  });
+
+  it('read asks the database for the sizes first and fetches bodies only up to the last row of the page', () => {
+    const res = run(pages(PARENT_CALLER), { setup: `${padded(3, 'a', 600000)} ${padded(5, 'b', 600000)}` });
+    const sized = res.log.filter((sql) => sql.startsWith('SELECT seq, LENGTH(body) AS size FROM wp_xp_family_records'));
+    const bodies = res.log.map((sql, i) => [sql, i]).filter(([sql]) => sql.startsWith('SELECT * FROM wp_xp_family_records'));
+    assert.strictEqual(sized.length, 3, 'one size query per page, the last one empty');
+    assert.strictEqual(bodies.length, 2, 'no body query for the empty page');
+    assert.deepStrictEqual(bodies.map(([, i]) => res.args[i]), [['fam-1', 0, 3, 200], ['fam-1', 3, 5, 200]]);
   });
 
   it('read goes after the number given, oldest first, up to the limit', () => {
@@ -1276,7 +1412,7 @@ describe('Routes: the handlers', () => {
         $db->log = [];
         $rest->read_records( $req );
         foreach ( $db->log as $q ) {
-          if ( 0 === strpos( $q['sql'], 'SELECT * FROM wp_xp_family_records' ) ) { $result[] = $q['args']; }
+          if ( 0 === strpos( $q['sql'], 'SELECT seq, LENGTH(body) AS size FROM wp_xp_family_records' ) ) { $result[] = $q['args']; }
         }
       }`);
     assert.deepStrictEqual(res.result, [['fam-1', 0, 100], ['fam-1', 41, 7], ['fam-1', 0, 1], ['fam-1', 0, 200], ['fam-1', 0, 1]]);
@@ -1291,11 +1427,11 @@ describe('Routes: the handlers', () => {
     assert.ok(res.log.some((sql) => sql.startsWith('UPDATE wp_xp_family_heroes SET turn_seen_at')), 'the holder\'s last seen was refreshed');
   });
 
-  it('GET /records for a hero key asks only for its own hero\'s rows', () => {
+  it('GET /records for a hero key asks only for the family\'s rows, the chat and its own hero\'s', () => {
     const res = handle('$result = $rest->read_records( $req );', { who: kid('h-1') });
-    const at = res.log.findIndex((sql) => sql.startsWith('SELECT * FROM wp_xp_family_records'));
-    assert.ok(res.log[at].includes('hero_id IS NULL OR hero_id = %s'), res.log[at]);
-    assert.deepStrictEqual(res.args[at], ['fam-1', 0, 'h-1', 100]);
+    const at = res.log.findIndex((sql) => sql.startsWith('SELECT seq, LENGTH(body) AS size FROM wp_xp_family_records'));
+    assert.ok(res.log[at].includes('hero_id IS NULL OR hero_id = %s OR store IN (%s)'), res.log[at]);
+    assert.deepStrictEqual(res.args[at], ['fam-1', 0, 'h-1', '__chat', 100]);
   });
 });
 

@@ -202,6 +202,16 @@ describe('Family rules: nicknames', () => {
       ['<b></b>', 'A hero phone'],
     ]);
   });
+
+  it('device_label takes the fallback its caller names when there is no text, and keeps real text', () => {
+    expectTable('device_label', [
+      ['', 'the family device', 'the family device'],
+      ['<b></b>', 'the family device', 'the family device'],
+      [null, 'the family device', 'the family device'],
+      ["Dad's tablet", 'the family device', "Dad's tablet"],
+      ['', null, 'A hero phone'],
+    ]);
+  });
 });
 
 describe('Family rules: ids', () => {

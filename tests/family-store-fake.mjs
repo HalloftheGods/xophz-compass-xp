@@ -151,15 +151,25 @@ class FakeFamilyDb {
       $this->records[ $own ] = $new;
       return $exists ? 2 : 1;
     }
-    if ( preg_match( '/^SELECT \\* FROM wp_xp_family_records WHERE family_id = %s AND seq > %d( AND \\( hero_id IS NULL OR hero_id = %s \\))? ORDER BY seq ASC LIMIT %d$/', $sql, $m ) ) {
-      $hero = empty( $m[1] ) ? null : $a[2];
+    if ( preg_match( '/^SELECT (\\*|seq, LENGTH\\(body\\) AS size) FROM wp_xp_family_records WHERE family_id = %s AND seq > %d( AND seq <= %d)?( AND \\( hero_id IS NULL OR hero_id = %s OR store IN \\(%s(, %s)*\\) \\))? ORDER BY seq ASC LIMIT %d$/', $sql, $m ) ) {
+      $i    = 2;
+      $upto = null;
+      if ( ! empty( $m[2] ) ) { $upto = (int) $a[ $i++ ]; }
+      $hero = null;
+      $any  = [];
+      if ( ! empty( $m[3] ) ) { $hero = $a[ $i++ ]; $any = array_slice( $a, $i, count( $a ) - $i - 1 ); }
       $out  = [];
       foreach ( $this->records as $row ) {
-        $seen = null === $hero || null === $row['hero_id'] || $hero === $row['hero_id'];
-        if ( $row['family_id'] === $a[0] && (int) $row['seq'] > (int) $a[1] && $seen ) { $out[] = $row; }
+        $seen = null === $hero || null === $row['hero_id'] || $hero === $row['hero_id'] || in_array( $row['store'], $any, true );
+        $fits = null === $upto || (int) $row['seq'] <= $upto;
+        if ( $row['family_id'] === $a[0] && (int) $row['seq'] > (int) $a[1] && $fits && $seen ) { $out[] = $row; }
       }
       usort( $out, function ( $x, $y ) { return $x['seq'] <=> $y['seq']; } );
-      return array_map( [ $this, 'text' ], array_slice( $out, 0, (int) end( $a ) ) );
+      $out = array_slice( $out, 0, (int) end( $a ) );
+      if ( '*' !== $m[1] ) {
+        return array_map( function ( $row ) { return $this->text( [ 'seq' => $row['seq'], 'size' => strlen( $row['body'] ) ] ); }, $out );
+      }
+      return array_map( [ $this, 'text' ], $out );
     }
 
     // The hero's turn.

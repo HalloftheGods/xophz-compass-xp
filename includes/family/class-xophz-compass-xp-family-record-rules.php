@@ -30,6 +30,10 @@ class Xophz_Compass_Xp_Family_Record_Rules {
    * key writes only its own hero's). hero_from: key (the record key is the hero id),
    * key_prefix (the part of the key before the first colon), userId or heroId (that field of
    * the body) or null (a family record belongs to no hero).
+   *
+   * A family-any record is read by everyone but owned by whoever wrote it: a hero key's record
+   * carries that key's hero (so only that hero's key can rewrite or remove it), a Game Master's
+   * carries none. Everyone reads every row of such a store; ownership only limits writing.
    */
   const STORES = [
     '__achievementCategories' => [ 'scope' => 'family',     'hero_from' => null ],
@@ -81,8 +85,10 @@ class Xophz_Compass_Xp_Family_Record_Rules {
    * @param mixed $raw        The wire record: store, key, hero_id, deleted and body (a JSON string).
    * @param array $caller_ctx writer (parent or hero) and key_hero_id (the hero of a hero key, else null).
    * @return array|string The clean record [ store, key, hero_id, deleted, body ] (body: the text as
-   *                      sent, or '' for a removal; hero_id: null for a family record), or the
-   *                      error code: xp_family_store_unknown, xp_family_record_invalid or xp_family_scope.
+   *                      sent, or '' for a removal; hero_id: null for a family record, and for a
+   *                      family-any record a Game Master writes; the hero of the key for one a hero
+   *                      key writes, whatever the wire says), or the error code:
+   *                      xp_family_store_unknown, xp_family_record_invalid or xp_family_scope.
    */
   public static function check( $raw, array $caller_ctx ) {
     if ( ! is_array( $raw ) ) {
@@ -146,9 +152,15 @@ class Xophz_Compass_Xp_Family_Record_Rules {
 
     if ( 'parent' !== ( $caller_ctx['writer'] ?? null ) ) {
       $own = $caller_ctx['key_hero_id'] ?? null;
-      $may = 'hero' === ( $caller_ctx['writer'] ?? null )
-        && ( 'family-any' === $def['scope'] || ( 'hero' === $def['scope'] && is_string( $own ) && $own === $hero_id ) );
-      if ( ! $may ) {
+      $own = is_string( $own ) && 1 === preg_match( self::HERO_ID_SHAPE, $own ) ? $own : null;
+      if ( 'hero' !== ( $caller_ctx['writer'] ?? null ) || null === $own ) {
+        return self::SCOPE;
+      }
+
+      if ( 'family-any' === $def['scope'] ) {
+        // The chat: any hero key writes it, and the row is then that hero's to rewrite or remove.
+        $hero_id = $own;
+      } elseif ( 'hero' !== $def['scope'] || $own !== $hero_id ) {
         return self::SCOPE;
       }
     }
@@ -195,13 +207,26 @@ class Xophz_Compass_Xp_Family_Record_Rules {
     return is_string( $id ) && 1 === preg_match( self::HERO_ID_SHAPE, $id ) ? $id : null;
   }
 
+  /** The stores any hero key may write (scope family-any): the chat. */
+  public static function any_writer_stores(): array {
+    $names = [];
+    foreach ( self::STORES as $name => $def ) {
+      if ( 'family-any' === $def['scope'] ) {
+        $names[] = $name;
+      }
+    }
+
+    return $names;
+  }
+
   /**
    * Whether a caller may read a stored record.
    *
-   * A parent reads all. A hero key reads the family records (no hero) and the records of its
-   * own hero. Anyone else reads nothing. The same filter as the store's query for a hero key.
+   * A parent reads all. A hero key reads the family records (no hero), every row of a
+   * family-any store (the chat, whoever wrote it) and the records of its own hero. Anyone else
+   * reads nothing. The same filter as the store's query for a hero key.
    *
-   * @param array $row        A stored record: hero_id (null for a family record).
+   * @param array $row        A stored record: store and hero_id (null for a family record).
    * @param array $caller_ctx writer (parent or hero) and key_hero_id.
    */
   public static function may_read( array $row, array $caller_ctx ): bool {
@@ -215,7 +240,11 @@ class Xophz_Compass_Xp_Family_Record_Rules {
 
     $hero_id = $row['hero_id'] ?? null;
     $own     = $caller_ctx['key_hero_id'] ?? null;
+    $store   = $row['store'] ?? null;
+    if ( null === $hero_id || ( is_string( $store ) && 'family-any' === ( self::STORES[ $store ]['scope'] ?? null ) ) ) {
+      return true;
+    }
 
-    return null === $hero_id || ( is_string( $own ) && $own === $hero_id );
+    return is_string( $own ) && $own === $hero_id;
   }
 }

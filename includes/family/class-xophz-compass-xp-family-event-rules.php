@@ -27,6 +27,9 @@ class Xophz_Compass_Xp_Family_Event_Rules {
    * and they can be private; only the hero's own phone and the parent see them, in a hero
    * sheet. The same holds for gold, which buys real rewards: it is only in the family kinds
    * hero.sheet and claim.settled, never in a public one.
+   *
+   * quest.claimed carries synced (bool) when the claim is also saved as a quest log record
+   * (family sync): the family device, which reads the record, then skips the event.
    */
   const KINDS = [
     'hero.card'      => [
@@ -47,7 +50,7 @@ class Xophz_Compass_Xp_Family_Event_Rules {
     'quest.claimed'  => [
       'scope'  => 'family',
       'writer' => [ 'home', 'hero' ],
-      'fields' => [ 'questId' => 'str64', 'difficulty' => 'int', 'requiresApproval' => 'bool' ],
+      'fields' => [ 'questId' => 'str64', 'difficulty' => 'int', 'requiresApproval' => 'bool', 'synced' => 'bool' ],
     ],
     'quest.approved' => [
       'scope'  => 'family',

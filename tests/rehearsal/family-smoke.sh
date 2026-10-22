@@ -4,7 +4,7 @@
 # Drives the real routes on the Town Hall's throwaway network (TH7) with curl and checks each
 # answer. Never point it at the live site.
 #
-#   tests/rehearsal/family-smoke.sh [family|phones|events|all]     (default: all)
+#   tests/rehearsal/family-smoke.sh [family|phones|events|records|all]     (default: all)
 #
 #   SITE     the family site      (default http://localhost:8090/doit)
 #   COMPOSE  the rehearsal file   (default $HOME/www/x/do-it-for-the-xp/tools/townhall-rehearsal/docker-compose.yml)
@@ -12,10 +12,15 @@
 #
 # Prints PASS <name> or FAIL <name> per check and exits 1 on any failure.
 #
-# It touches only what it makes: the families F1 and F2 (and their heroes, phones, codes and
-# events), the users smokeparent2 and smokeoutsider, the Application Passwords named "smoke" and
-# its own claim counters. Each section starts with reset_family, so a section runs on its own,
+# It touches only what it makes: the families F1 and F2 (and their heroes, phones, codes, events
+# and records), the users smokeparent2 and smokeoutsider, the Application Passwords named "smoke"
+# and its own claim counters. Each section starts with reset_family, so a section runs on its own,
 # and the run ends by removing the smoke families and the passwords it made.
+#
+# The records section (family-smoke-records.sh, sourced below) needs a family that is entitled to
+# XP Pro. The rehearsal has no licence, so it sets the rehearsal-only option xp_family_pro_override
+# (which Family_Pro::entitled reads only while WP_DEBUG is on) for its own checks and removes it
+# before it ends, and teardown removes it again if the run stopped half way.
 set -uo pipefail
 
 SITE="${SITE:-http://localhost:8090/doit}"
@@ -37,11 +42,15 @@ PHONE1="SmokeHeroPhone01"
 PHONE2="SmokeHeroPhone02"
 PHONE3="SmokeHeroPhone03"
 
+# The rehearsal-only Pro override (Family_Pro::OVERRIDE_OPTION), and whether this run set it.
+PRO_OVERRIDE="xp_family_pro_override"
+OVERRIDE_SET=0
+
 SECTION="${1:-all}"
 case "$SECTION" in
-  family | phones | events | all) ;;
+  family | phones | events | records | all) ;;
   *)
-    printf 'usage: %s [family|phones|events|all]\n' "$0" >&2
+    printf 'usage: %s [family|phones|events|records|all]\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -147,7 +156,10 @@ sql() { wp db query "$1" --skip-column-names; }
 
 smoke_families_sql() {
   local in="('$F1','$F2')"
-  printf '%s' "DELETE FROM ${PREFIX}xp_family_events WHERE family_id IN $in;
+  # The records go with the family (their numbers live in the family's records_seq and the turns
+  # in the heroes' turn_* columns, so deleting those rows clears them); the next bind starts at 0.
+  printf '%s' "DELETE FROM ${PREFIX}xp_family_records WHERE family_id IN $in;
+DELETE FROM ${PREFIX}xp_family_events WHERE family_id IN $in;
 DELETE FROM ${PREFIX}xp_family_link_codes WHERE family_id IN $in;
 DELETE FROM ${PREFIX}xp_family_devices WHERE family_id IN $in;
 DELETE FROM ${PREFIX}xp_family_heroes WHERE family_id IN $in;
@@ -257,9 +269,11 @@ setup() {
   fi
 }
 
-# Remove what the run made: the smoke families, the claim counters and the smoke passwords.
+# Remove what the run made: the smoke families, the claim counters, the smoke passwords and the
+# Pro override when the records section left it on.
 teardown() {
   if [ -n "$PREFIX" ]; then
+    [ "$OVERRIDE_SET" = 1 ] && wp option delete "$PRO_OVERRIDE" > /dev/null 2>&1
     local deletes="" pair
     for pair in $PASSWORD_UUIDS; do
       deletes="$deletes WP_Application_Passwords::delete_application_password( get_user_by( 'login', '${pair%%:*}' )->ID, '${pair#*:}' );"
@@ -720,6 +734,9 @@ section_events() {
     ".status == 200 and ([.body[] | select(.id == \"$good_id\")] | length) == 0 and ([.body[] | select(.id == \"$card_id\")] | length) == 1"
 }
 
+# The records section: the family's save, a hero's turn and the Pro gate.
+source "$(dirname "${BASH_SOURCE[0]}")/family-smoke-records.sh"
+
 # --- run -------------------------------------------------------------------------------------
 setup
 
@@ -727,10 +744,12 @@ case "$SECTION" in
   family) section_family ;;
   phones) section_phones ;;
   events) section_events ;;
+  records) section_records ;;
   all)
     section_family
     section_phones
     section_events
+    section_records
     ;;
 esac
 

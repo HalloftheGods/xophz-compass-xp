@@ -25,9 +25,10 @@ class Xophz_Compass_Xp_Family_Events {
    * Each event is checked on its own: a refused one (a sibling's event from a hero key, a
    * reward.granted from a device, an unknown kind...) is listed in rejected and the rest of
    * the batch carries on. The whole batch is refused only when it is not a list or has more
-   * than 50 events (400 xp_family_bad_request), when a parent sends from a device that is not
-   * the family's home (409 xp_family_moved), when it would take a hero or the family past the
-   * hourly limits (429 xp_family_rate_limited) or when the family's lock is busy (503).
+   * than 50 events (400 xp_family_bad_request), when a parent of a family that is not entitled
+   * to XP Pro sends from a device that is not the family's home (409 xp_family_moved; an entitled
+   * family's parents may send from any of their devices), when it would take a hero or the family
+   * past the hourly limits (429 xp_family_rate_limited) or when the family's lock is busy (503).
    *
    * @param array $family The caller's family row.
    * @param array $caller The caller: parent (writes as the home device) or hero (its phone).
@@ -48,10 +49,17 @@ class Xophz_Compass_Xp_Family_Events {
       return self::error( 'xp_family_forbidden', 'This caller may not do that.', 403 );
     }
 
+    $now = time();
+
     if ( ! $is_hero ) {
       $home = (string) $family['home_device_id'];
       foreach ( $events as $e ) {
         if ( is_array( $e ) && is_string( $e['device_id'] ?? null ) && $e['device_id'] !== $home ) {
+          // An entitled family has no home device to keep: every parent device is a family device.
+          // The licence is read only when a batch comes from another device.
+          if ( Xophz_Compass_Xp_Family_Pro::entitled( $family_id, $now ) ) {
+            break;
+          }
           return self::error( 'xp_family_moved', "This family's home is another device now.", 409 );
         }
       }
@@ -61,7 +69,7 @@ class Xophz_Compass_Xp_Family_Events {
       'writer'      => $is_hero ? 'hero' : 'home',
       'hero_ids'    => array_map( 'strval', array_column( $store->heroes( $family_id ), 'hero_id' ) ),
       'key_hero_id' => $is_hero ? (string) $caller['device']['hero_id'] : null,
-      'now'         => time(),
+      'now'         => $now,
     ];
     $phone_id = $is_hero ? (string) $caller['device']['device_id'] : '';
 

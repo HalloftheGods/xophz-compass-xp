@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it, assert, assertNoEmDashes } from '../../xophz-compass/tests/harness/test-framework.mjs';
 import { runPhpJson } from '../../xophz-compass/tests/harness/php-executor.mjs';
 import { RULES, CLS, DEVICE, lit, wireEvent, context, checks, dataOfBytes } from './family-event-rules.test.mjs';
+import { gatekeeper } from './family-pro.test.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = '/var/www/html/wp-content/plugins/xophz-compass-xp';
@@ -406,6 +407,7 @@ describe('Two-phone events: a batch through send', () => {
   /** A small in-memory stand-in for wpdb: the few calls the event stream makes. */
   const STAND_IN = `
     require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-store.php';
+    require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-pro.php';
     require_once '${PLUGIN}/includes/family/class-xophz-compass-xp-family-events.php';
     if ( ! defined( 'ARRAY_A' ) ) { define( 'ARRAY_A', 'ARRAY_A' ); }
     class StandInDb {
@@ -423,9 +425,13 @@ describe('Two-phone events: a batch through send', () => {
     }
   `;
 
-  /** Each call is [ 'hero' | 'home', events ]; one store across the calls. */
-  function sends(calls) {
-    return runPhpJson(`${RULES} ${STAND_IN}
+  /**
+   * Each call is [ 'hero' | 'home', events ]; one store across the calls. `records` are the XP Pro
+   * licences of the Gatekeeper stand-in (family id to record); null leaves the plugin out, so the
+   * family is a free one.
+   */
+  function sends(calls, { records = null } = {}) {
+    return runPhpJson(`${RULES} ${STAND_IN} ${records === null ? '' : gatekeeper(records)}
       $db     = new StandInDb();
       $store  = new Xophz_Compass_Xp_Family_Store( $db );
       $family = [ 'family_id' => 'fam-1', 'home_device_id' => 'homedevice000001' ];
@@ -436,7 +442,11 @@ describe('Two-phone events: a batch through send', () => {
         $r = Xophz_Compass_Xp_Family_Events::send( $store, $family, 'hero' === $call[0] ? $phone : $home, $call[1] );
         $out[] = is_wp_error( $r ) ? [ 'error' => $r->get_error_code() ] : $r;
       }
-      echo json_encode( [ 'results' => $out, 'stored' => array_values( $db->rows ) ] );`);
+      echo json_encode( [
+        'results' => $out,
+        'stored'  => array_values( $db->rows ),
+        'gets'    => class_exists( 'Gatekeeper_Xp_Pro_Licenses' ) ? Gatekeeper_Xp_Pro_Licenses::$gets : 0,
+      ] );`);
   }
 
   const claim = (n, over = {}) => sample('quest.claimed', { id: uuid(n), ...over });
@@ -466,6 +476,50 @@ describe('Two-phone events: a batch through send', () => {
     assert.deepStrictEqual(res.rejected.map((r) => r.id), [uuid(4), uuid(5), uuid(6), uuid(8)]);
     for (const r of res.rejected) assert.strictEqual(r.code, 'xp_family_event_invalid');
     assert.strictEqual(stored.length, 1);
+  });
+
+  // The relaxed home rule: a parent's batch from a device that is not the family's home.
+  const OTHER = 'otherparent00001';
+  const HOME = 'homedevice000001';
+  const away = (n, over = {}) => sample('quest.approved', { id: uuid(n), device_id: OTHER, ...over });
+  const atHome = (n) => sample('quest.approved', { id: uuid(n), device_id: HOME });
+  const PAID = { 'fam-1': { status: 'active', expires_at: null, plan: 'lifetime' } };
+  const secondsAgo = (secs) => new Date(Date.now() - secs * 1000).toISOString().slice(0, 19) + 'Z';
+
+  it('an entitled family may send from a device that is not home', () => {
+    const { results, stored } = sends([['home', [away(40)]], ['home', [atHome(41), away(42)]]], { records: PAID });
+    assert.deepStrictEqual(results[0], { accepted: [uuid(40)], duplicate: [], rejected: [] });
+    assert.deepStrictEqual(results[1], { accepted: [uuid(41), uuid(42)], duplicate: [], rejected: [] });
+    assert.deepStrictEqual(stored.map((r) => r.device_id), [OTHER, HOME, OTHER]);
+  });
+
+  it('an unentitled family still gets xp_family_moved for a batch from another device, and nothing is stored', () => {
+    const lapsed = { 'fam-1': { status: 'active', expires_at: secondsAgo(4 * 86400), plan: 'monthly' } };
+    const revoked = { 'fam-1': { status: 'revoked', expires_at: null, plan: 'yearly' } };
+    for (const records of [null, {}, lapsed, revoked]) {
+      const { results, stored } = sends([['home', [away(43)]], ['home', [atHome(44), away(45)]]], { records });
+      assert.deepStrictEqual(results, [{ error: 'xp_family_moved' }, { error: 'xp_family_moved' }], JSON.stringify(records));
+      assert.deepStrictEqual(stored, []);
+    }
+  });
+
+  it('the licence is read only when a parent sends from another device, never for the home device or a hero phone', () => {
+    const quiet = sends([['home', [atHome(48)]], ['hero', [sample('quest.claimed', { id: uuid(49) })]]], { records: PAID });
+    assert.strictEqual(quiet.gets, 0);
+    const asked = sends([['home', [away(50)]], ['home', [away(51), away(52)]]], { records: PAID });
+    assert.strictEqual(asked.gets, 1, 'once for the request');
+  });
+
+  it('a free family still sends from its home device', () => {
+    const { results } = sends([['home', [atHome(46)]]]);
+    assert.deepStrictEqual(results[0], { accepted: [uuid(46)], duplicate: [], rejected: [] });
+  });
+
+  it('a hero phone gains nothing from the family being entitled: it can still only send its own events', () => {
+    const { results, stored } = sends([['hero', [sample('quest.claimed', { id: uuid(47), device_id: OTHER })]]], { records: PAID });
+    assert.deepStrictEqual(results[0].accepted, []);
+    assert.deepStrictEqual(results[0].rejected.map((r) => r.id), [uuid(47)]);
+    assert.deepStrictEqual(stored, []);
   });
 
   it('the home device sends all five kinds in one batch', () => {

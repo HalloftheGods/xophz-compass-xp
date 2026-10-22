@@ -149,7 +149,7 @@ section_records() {
   ok "h-1's phone writes h-1's profile while D1 holds the turn -> refused xp_family_turn" \
     '.status == 200 and .body.accepted == [] and .body.refused[0].store == "__profiles" and .body.refused[0].code == "xp_family_turn"'
   req "key:$key1" PUT /records "$(put_body "" \
-    "$(rec __achievements ql-hack - '{"name":"Hack"}')" \
+    "$(rec __shops shop-hack - '{"name":"Hack"}')" \
     "$(rec __questLog log-2x h-2 '{"userId":"h-2"}')" \
     "$(rec __chat msg-1 - '{"text":"Hello"}')")"
   ok "a hero key: a family store and h-2's log -> xp_family_scope, its chat message accepted as 7" \

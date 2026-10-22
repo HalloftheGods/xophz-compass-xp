@@ -26,10 +26,13 @@ const INVALID = 'xp_family_record_invalid';
 const SCOPE = 'xp_family_scope';
 const UNKNOWN = 'xp_family_store_unknown';
 
+/** The stores only a Game Master writes (scope family). */
 const FAMILY_STORES = [
-  '__achievementCategories', '__beasts', '__achievements', '__abilities', '__accessories',
+  '__achievementCategories', '__abilities', '__accessories',
   '__shops', '__temples', '__dosDonts', '__family_settings', '__packs',
 ];
+/** The stores any hero key may write (scope family-any), in the order of the rules' table. */
+const ANY_WRITER_STORES = ['__beasts', '__achievements', '__chat'];
 
 function lit(value) {
   return `json_decode(<<<'JSON'\n${JSON.stringify(value)}\nJSON\n, true)`;
@@ -112,7 +115,7 @@ describe('Record rules', () => {
     const res = runPhpJson(`${RULES} echo json_encode( ${CLS}::STORES );`);
     const expected = {};
     for (const store of FAMILY_STORES) expected[store] = { scope: 'family', hero_from: null };
-    expected.__chat = { scope: 'family-any', hero_from: null };
+    for (const store of ANY_WRITER_STORES) expected[store] = { scope: 'family-any', hero_from: null };
     expected.__profiles = { scope: 'hero', hero_from: 'key' };
     expected.__questLog = { scope: 'hero', hero_from: 'userId' };
     expected.__purchaseLog = { scope: 'hero', hero_from: 'userId' };
@@ -264,7 +267,7 @@ describe('Record rules', () => {
     assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), [INVALID, INVALID, 'ok']);
   });
 
-  it('a hero key may write only __chat and its own hero\'s records', () => {
+  it('a hero key may write only the any-writer stores (the beasts, the quests, the chat) and its own hero\'s records', () => {
     const own = heroKey('h-1');
     const res = checks([
       [sample('__profiles'), own],
@@ -275,56 +278,68 @@ describe('Record rules', () => {
       [sample('__templeProgress'), own],
       [sample('__notifications'), own],
       [sample('__chat'), own],
+      [sample('__achievements'), own],
+      [sample('__beasts'), own],
       [rec('__profiles', 'h-2', { id: 'h-2' }, { hero_id: 'h-2' }), own],
       [rec('__questLog', 'ql-9', { userId: 'h-2' }), own],
       [rec('__latePenalties', 'lp-9', { heroId: 'h-2' }), own],
       [rec('__templeProgress', 'h-2:temple-x', {}), own],
       [rec('__notifications', 'h-2', {}), own],
-      [sample('__achievements'), own],
-      [sample('__beasts'), own],
       [sample('__family_settings'), own],
       [sample('__packs'), own],
     ]);
     const codes = res.map((r) => (typeof r === 'string' ? r : 'ok'));
     assert.deepStrictEqual(codes, [
-      'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok',
+      'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok',
       SCOPE, SCOPE, SCOPE, SCOPE, SCOPE,
-      SCOPE, SCOPE, SCOPE, SCOPE,
+      SCOPE, SCOPE,
     ]);
-    assert.strictEqual(res[7].hero_id, 'h-1', 'a hero key\'s chat record is stamped with the key\'s hero');
+    for (const i of [7, 8, 9]) assert.strictEqual(res[i].hero_id, 'h-1', 'a hero key\'s chat, quest or beast record is stamped with the key\'s hero');
     assert.strictEqual(res[0].hero_id, 'h-1');
   });
 
-  it('a hero key\'s chat record, live or removed, carries the key\'s hero whatever the wire says; a parent\'s carries none', () => {
-    const res = checks([
-      [sample('__chat'), heroKey('h-1')],
-      [sample('__chat', { hero_id: 'h-2' }), heroKey('h-1')],
-      [sample('__chat', { hero_id: 'h-1' }), heroKey('h-2')],
-      [tomb('__chat', 'm-1'), heroKey('h-2')],
-      [tomb('__chat', 'm-1', { hero_id: 'h-1' }), heroKey('h-2')],
-      [sample('__chat'), PARENT],
-      [sample('__chat', { hero_id: 'h-2' }), PARENT],
-      [tomb('__chat', 'm-1'), PARENT],
-    ]);
-    assert.deepStrictEqual(res.map((r) => r.hero_id), ['h-1', 'h-1', 'h-2', 'h-2', 'h-2', null, null, null]);
-    assert.deepStrictEqual(res[0], { store: '__chat', key: 'm-1', hero_id: 'h-1', deleted: false, body: JSON.stringify({ text: 'hello' }) });
+  it('a hero key still may not write any of the stores only a Game Master writes', () => {
+    const res = checks(FAMILY_STORES.map((s) => [sample(s), heroKey('h-1')]));
+    assert.strictEqual(res.length, 8);
+    assert.deepStrictEqual(res, Array(FAMILY_STORES.length).fill(SCOPE));
   });
 
-  it('any_writer_stores names the stores any hero key may write: the chat', () => {
+  for (const store of ANY_WRITER_STORES) {
+    const key = SAMPLES[store][0];
+    it(`a hero key's ${store} record, live or removed, carries the key's hero whatever the wire says; a parent's carries none`, () => {
+      const res = checks([
+        [sample(store), heroKey('h-1')],
+        [sample(store, { hero_id: 'h-2' }), heroKey('h-1')],
+        [sample(store, { hero_id: 'h-1' }), heroKey('h-2')],
+        [tomb(store, key), heroKey('h-2')],
+        [tomb(store, key, { hero_id: 'h-1' }), heroKey('h-2')],
+        [sample(store), PARENT],
+        [sample(store, { hero_id: 'h-2' }), PARENT],
+        [tomb(store, key), PARENT],
+      ]);
+      assert.deepStrictEqual(res.map((r) => r.hero_id), ['h-1', 'h-1', 'h-2', 'h-2', 'h-2', null, null, null]);
+      assert.deepStrictEqual(res[0], { store, key, hero_id: 'h-1', deleted: false, body: JSON.stringify(SAMPLES[store][1]) });
+    });
+  }
+
+  it('any_writer_stores names the stores any hero key may write: the beasts, the quests and the chat', () => {
     const stores = runPhpJson(`${RULES} echo json_encode( ${CLS}::any_writer_stores() );`);
-    assert.deepStrictEqual(stores, ['__chat']);
+    assert.deepStrictEqual(stores, ANY_WRITER_STORES);
   });
 
   it('a hero key with no hero, or an unknown kind of caller, writes nothing it does not own', () => {
     const res = checks([
       [sample('__profiles'), { writer: 'hero', key_hero_id: null }],
-      [sample('__chat'), { writer: 'hero', key_hero_id: null }],
       [sample('__shops'), { writer: 'none', key_hero_id: null }],
-      [sample('__chat'), { writer: 'none', key_hero_id: null }],
-      [sample('__chat'), {}],
-      [sample('__chat'), { writer: 'server' }],
+      ...ANY_WRITER_STORES.flatMap((s) => [
+        [sample(s), { writer: 'hero', key_hero_id: null }],
+        [sample(s), { writer: 'none', key_hero_id: null }],
+        [sample(s), {}],
+        [sample(s), { writer: 'server' }],
+      ]),
     ]);
-    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), [SCOPE, SCOPE, SCOPE, SCOPE, SCOPE, SCOPE], 'no hero, no chat row to own');
+    assert.strictEqual(res.length, 2 + ANY_WRITER_STORES.length * 4);
+    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), Array(res.length).fill(SCOPE), 'no hero, no row to own');
   });
 
   it('a parent may write every store', () => {
@@ -337,7 +352,7 @@ describe('Record rules', () => {
       assert.strictEqual(r.body, JSON.stringify(SAMPLES[stores[i]][1]));
     });
     const hero = Object.fromEntries(stores.map((s, i) => [s, res[i].hero_id]));
-    for (const s of [...FAMILY_STORES, '__chat']) assert.strictEqual(hero[s], null, s);
+    for (const s of [...FAMILY_STORES, ...ANY_WRITER_STORES]) assert.strictEqual(hero[s], null, s);
     for (const s of ['__profiles', '__questLog', '__purchaseLog', '__castLog', '__latePenalties', '__templeProgress', '__notifications']) {
       assert.strictEqual(hero[s], 'h-1', s);
     }
@@ -393,6 +408,8 @@ describe('Record rules', () => {
       [tomb('__shops', 's-1', { body: '' }), PARENT],
       [tomb('__shops', 's-1', { body: null }), PARENT],
       [tomb('__profiles', 'h-1', { hero_id: 'h-1' }), PARENT],
+      [tomb('__achievements', 'q-1'), PARENT],
+      [tomb('__beasts', 'b-1'), PARENT],
     ]);
     const tombstone = (store, key, hero) => ({ store, key, hero_id: hero, deleted: true, body: '' });
     assert.deepStrictEqual(res, [
@@ -404,6 +421,8 @@ describe('Record rules', () => {
       tombstone('__shops', 's-1', null),
       tombstone('__shops', 's-1', null),
       tombstone('__profiles', 'h-1', 'h-1'),
+      tombstone('__achievements', 'q-1', null),
+      tombstone('__beasts', 'b-1', null),
     ]);
   });
 
@@ -441,9 +460,12 @@ describe('Record rules', () => {
       [tomb('__questLog', 'ql-1', { hero_id: 'h-1' }), own],
       [tomb('__questLog', 'ql-1', { hero_id: 'h-2' }), own],
       [tomb('__chat', 'm-1'), own],
+      [tomb('__achievements', 'q-1'), own],
+      [tomb('__beasts', 'b-1'), own],
       [tomb('__shops', 's-1'), own],
     ]);
-    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), ['ok', SCOPE, SCOPE, 'ok', SCOPE, 'ok', SCOPE]);
+    assert.deepStrictEqual(res.map((r) => (typeof r === 'string' ? r : 'ok')), ['ok', SCOPE, SCOPE, 'ok', SCOPE, 'ok', 'ok', 'ok', SCOPE]);
+    assert.deepStrictEqual(res.slice(5, 8).map((r) => [r.store, r.hero_id, r.deleted]), [['__chat', 'h-1', true], ['__achievements', 'h-1', true], ['__beasts', 'h-1', true]], 'a removal stays that hero\'s row');
   });
 
   it('the record decides before the caller: a bad record is invalid whoever sends it, an unknown store is unknown', () => {
@@ -455,7 +477,7 @@ describe('Record rules', () => {
     assert.deepStrictEqual(res, [INVALID, UNKNOWN, INVALID]);
   });
 
-  it('may_read: a hero key reads family stores, every chat row and its own hero\'s rows only', () => {
+  it('may_read: a hero key reads family stores, every row of the beasts, the quests and the chat, and its own hero\'s rows only', () => {
     const own = heroKey('h-1');
     const res = reads([
       [{ store: '__shops', hero_id: null }, own],
@@ -470,8 +492,14 @@ describe('Record rules', () => {
       [{ store: '__chat', hero_id: 'h-2' }, own],
       [{ store: '__chat', hero_id: 'h-1' }, own],
       [{ store: '__chat', hero_id: 'h-2' }, { writer: 'hero', key_hero_id: null }],
+      ...['__achievements', '__beasts'].flatMap((store) => [
+        [{ store, hero_id: null }, own],
+        [{ store, hero_id: 'h-2' }, own],
+        [{ store, hero_id: 'h-1' }, own],
+        [{ store, hero_id: 'h-2' }, { writer: 'hero', key_hero_id: null }],
+      ]),
     ]);
-    assert.deepStrictEqual(res, [true, true, true, true, false, false, false, false, true, true, true, true]);
+    assert.deepStrictEqual(res, [true, true, true, true, false, false, false, false, true, true, true, true, ...Array(8).fill(true)]);
   });
 
   it('may_read: a parent reads every row, and anyone else reads nothing', () => {
@@ -729,40 +757,57 @@ describe('Record store', () => {
       assert.strictEqual(res.counters['fam-1'], 41);
     });
 
-    const CHAT_SEEDS = `${SEEDS}
-      $db->add_record( 'fam-1', '__chat', 'c-mine', 20, 'h-1', '{"text":"mine"}' );
-      $db->add_record( 'fam-1', '__chat', 'c-sib', 21, 'h-2', '{"text":"sibling"}' );`;
-    /** A chat record as the record rules hand it over for a hero key: stamped with the key's hero. */
-    const said = (key, text = 'hi') => clean('__chat', key, JSON.stringify({ text }), { hero_id: 'h-1' });
-    const unsaid = (key) => gone('__chat', key, { hero_id: 'h-1' });
+    // The any-writer stores (the chat, the quests, the beasts): each has a Game Master's row (no owner), a row of h-1 and a row of h-2.
+    const ANY_WRITER_CASES = [
+      { store: '__chat', field: 'text', gm: 'c-1', gmSeq: 9, mine: 'c-mine', mineSeq: 20, sib: 'c-sib', sibSeq: 21, fresh: 'c-new' },
+      { store: '__achievements', field: 'name', gm: 'q-gm', gmSeq: 22, mine: 'q-mine', mineSeq: 23, sib: 'q-sib', sibSeq: 24, fresh: 'q-new' },
+      { store: '__beasts', field: 'name', gm: 'b-gm', gmSeq: 25, mine: 'b-mine', mineSeq: 26, sib: 'b-sib', sibSeq: 27, fresh: 'b-new' },
+    ];
+    for (const { store, field, gm, gmSeq, mine, mineSeq, sib, sibSeq, fresh } of ANY_WRITER_CASES) {
+      const WRITER_SEEDS = `${SEEDS}
+        $db->add_record( 'fam-1', '${store}', '${gm}', ${gmSeq}, null, '{"${field}":"hi"}' );
+        $db->add_record( 'fam-1', '${store}', '${mine}', ${mineSeq}, 'h-1', '{"${field}":"mine"}' );
+        $db->add_record( 'fam-1', '${store}', '${sib}', ${sibSeq}, 'h-2', '{"${field}":"sibling"}' );`;
+      /** A record of this store as the record rules hand it over for a hero key: stamped with the key's hero. */
+      const said = (key, text = 'hi') => clean(store, key, JSON.stringify({ [field]: text }), { hero_id: 'h-1' });
+      const unsaid = (key) => gone(store, key, { hero_id: 'h-1' });
+      const rowsOf = (res) => Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
 
-    it('chat: a hero key creates a row and rewrites or removes its own, and the row keeps its owner', () => {
-      const res = upsert([said('c-new'), said('c-mine', 'edited'), unsaid('c-mine')], { setup: CHAT_SEEDS, caller: 'h-1' });
-      assert.deepStrictEqual(res.result.accepted.map((r) => [r.key, r.seq]), [['c-new', 41], ['c-mine', 42], ['c-mine', 43]]);
-      assert.deepStrictEqual(res.result.refused, []);
-      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
-      assert.deepStrictEqual([byKey['c-new'].hero_id, byKey['c-new'].seq], ['h-1', 41]);
-      assert.deepStrictEqual([byKey['c-mine'].hero_id, byKey['c-mine'].deleted], ['h-1', 1]);
-    });
+      it(`${store}: a hero key creates a row and rewrites or removes its own, and the row keeps its owner`, () => {
+        const res = upsert([said(fresh), said(mine, 'edited'), unsaid(mine)], { setup: WRITER_SEEDS, caller: 'h-1' });
+        assert.deepStrictEqual(res.result.accepted.map((r) => [r.key, r.seq]), [[fresh, 41], [mine, 42], [mine, 43]]);
+        assert.deepStrictEqual(res.result.refused, []);
+        const byKey = rowsOf(res);
+        assert.deepStrictEqual([byKey[fresh].hero_id, byKey[fresh].seq, byKey[fresh].deleted], ['h-1', 41, 0]);
+        assert.deepStrictEqual([byKey[mine].hero_id, byKey[mine].deleted], ['h-1', 1]);
+      });
 
-    it('chat: a row of another hero, or of nobody (a Game Master\'s), is refused with xp_family_scope, live or removed', () => {
-      const res = upsert([said('c-sib', 'hijack'), unsaid('c-sib'), said('c-1', 'hijack'), unsaid('c-1'), said('c-mine ', 'padded'), said('c-sib ')], { setup: CHAT_SEEDS, caller: 'h-1' });
-      assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [
-        ['c-sib', 'xp_family_scope'], ['c-sib', 'xp_family_scope'], ['c-1', 'xp_family_scope'], ['c-1', 'xp_family_scope'], ['c-sib ', 'xp_family_scope'],
-      ]);
-      assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-mine ']);
-      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
-      assert.deepStrictEqual([byKey['c-sib'].hero_id, byKey['c-sib'].seq, byKey['c-sib'].deleted], ['h-2', 21, 0], 'the sibling\'s message is untouched');
-      assert.deepStrictEqual([byKey['c-1'].hero_id, byKey['c-1'].seq, byKey['c-1'].deleted], [null, 9, 0], 'a Game Master\'s message is untouched');
-    });
+      it(`${store}: a hero key rewrites its own row and the body is kept as sent`, () => {
+        const res = upsert([said(mine, 'edited')], { setup: WRITER_SEEDS, caller: 'h-1' });
+        assert.deepStrictEqual(res.result.accepted.map((r) => [r.key, r.seq]), [[mine, 41]]);
+        assert.deepStrictEqual([rowsOf(res)[mine].body, rowsOf(res)[mine].hero_id], [JSON.stringify({ [field]: 'edited' }), 'h-1']);
+      });
 
-    it('chat: a parent writes any chat row, and a row it writes belongs to nobody', () => {
-      const res = upsert([clean('__chat', 'c-mine', '{"text":"moderated"}'), clean('__chat', 'c-sib', '{"text":"fixed"}'), gone('__chat', 'c-1')], { setup: CHAT_SEEDS, caller: null });
-      assert.deepStrictEqual(res.result.accepted.map((r) => r.key), ['c-mine', 'c-sib', 'c-1']);
-      const byKey = Object.fromEntries(res.rows.map((row) => [row.record_key, row]));
-      assert.strictEqual(byKey['c-mine'].hero_id, null);
-      assert.strictEqual(byKey['c-sib'].hero_id, null);
-    });
+      it(`${store}: a row of another hero, or of nobody (a Game Master\'s), is refused with xp_family_scope, live or removed`, () => {
+        const res = upsert([said(sib, 'hijack'), unsaid(sib), said(gm, 'hijack'), unsaid(gm), said(`${mine} `, 'padded'), said(`${sib} `)], { setup: WRITER_SEEDS, caller: 'h-1' });
+        assert.deepStrictEqual(res.result.refused.map((r) => [r.key, r.code]), [
+          [sib, 'xp_family_scope'], [sib, 'xp_family_scope'], [gm, 'xp_family_scope'], [gm, 'xp_family_scope'], [`${sib} `, 'xp_family_scope'],
+        ]);
+        assert.deepStrictEqual(res.result.accepted.map((r) => r.key), [`${mine} `]);
+        const byKey = rowsOf(res);
+        assert.deepStrictEqual([byKey[sib].hero_id, byKey[sib].seq, byKey[sib].deleted, byKey[sib].body], ['h-2', sibSeq, 0, JSON.stringify({ [field]: 'sibling' })], 'the sibling\'s row is untouched');
+        assert.deepStrictEqual([byKey[gm].hero_id, byKey[gm].seq, byKey[gm].deleted, byKey[gm].body], [null, gmSeq, 0, JSON.stringify({ [field]: 'hi' })], 'a Game Master\'s row is untouched');
+        assert.strictEqual(res.counters['fam-1'], 41, 'a refused record takes no number');
+      });
+
+      it(`${store}: a parent writes any row, and a row it writes belongs to nobody`, () => {
+        const res = upsert([clean(store, mine, JSON.stringify({ [field]: 'moderated' })), clean(store, sib, JSON.stringify({ [field]: 'fixed' })), gone(store, gm), clean(store, fresh, JSON.stringify({ [field]: 'new' }))], { setup: WRITER_SEEDS, caller: null });
+        assert.deepStrictEqual(res.result.accepted.map((r) => r.key), [mine, sib, gm, fresh]);
+        assert.deepStrictEqual(res.result.refused, []);
+        const byKey = rowsOf(res);
+        assert.deepStrictEqual([byKey[mine].hero_id, byKey[sib].hero_id, byKey[fresh].hero_id], [null, null, null]);
+      });
+    }
 
     it('looks the batch\'s keys up once, under the lock and before it numbers anything', () => {
       const res = asKid([hero('__questLog', 'ql-mine', 'h-1'), hero('__questLog', 'ql-new', 'h-1'), clean('__chat', 'c-1', '{}')]);
@@ -932,8 +977,21 @@ describe('Record store: records_after', () => {
       assert.deepStrictEqual(seqs(after(0, 100, 'h-2')), [3, 7, 9, 13, 15]);
       assert.deepStrictEqual(seqs(after(4, 100, 'h-3')), [9, 13, 15]);
       const res = after(0, 10, 'h-1');
-      assert.ok(res.log[0].includes('( hero_id IS NULL OR hero_id = %s OR store IN (%s) )') && res.log[0].includes('ORDER BY seq ASC LIMIT %d'), res.log[0]);
-      assert.deepStrictEqual(res.args[0], ['fam-1', 0, 'h-1', '__chat', 10]);
+      assert.ok(res.log[0].includes('( hero_id IS NULL OR hero_id = %s OR store IN (%s, %s, %s) )') && res.log[0].includes('ORDER BY seq ASC LIMIT %d'), res.log[0]);
+      assert.deepStrictEqual(res.args[0], ['fam-1', 0, 'h-1', '__beasts', '__achievements', '__chat', 10]);
+    });
+
+    it('with a hero, returns every quest and beast row too, whoever wrote it, and still hides another hero\'s own records', () => {
+      const withQuests = `${rows}
+        $db->add_record( 'fam-1', '__achievements', 'q-1', 17, 'h-2', '{"name":"quest of h-2"}' );
+        $db->add_record( 'fam-1', '__achievements', 'q-2', 18, null, '{"name":"quest of a parent"}' );
+        $db->add_record( 'fam-1', '__beasts', 'b-1', 19, 'h-2', '{"name":"beast of h-2"}' );
+        $db->add_record( 'fam-1', '__beasts', 'b-2', 20, 'h-1', '{"name":"beast of h-1"}' );
+        $db->add_record( 'fam-1', '__questLog', 'ql-2', 21, 'h-2', '{"userId":"h-2"}' );`;
+      const reader = (heroId) => run(withQuests, `$result = $store->records_after( 'fam-1', 0, 100, '${heroId}' );`);
+      assert.deepStrictEqual(seqs(reader('h-1')), [3, 5, 9, 11, 13, 15, 17, 18, 19, 20], 'h-1 reads h-2\'s quest and beast, not h-2\'s log');
+      assert.deepStrictEqual(seqs(reader('h-2')), [3, 7, 9, 13, 15, 17, 18, 19, 20, 21], 'h-2 reads h-1\'s beast, not h-1\'s log');
+      assert.deepStrictEqual(seqs(reader('h-3')), [3, 9, 13, 15, 17, 18, 19, 20], 'a hero with no rows still reads every quest and beast');
     });
 
     it('with a byte cap, ends the page before the row that would pass it, always keeps one row, and fetches no body beyond the page', () => {
@@ -1427,11 +1485,11 @@ describe('Routes: the handlers', () => {
     assert.ok(res.log.some((sql) => sql.startsWith('UPDATE wp_xp_family_heroes SET turn_seen_at')), 'the holder\'s last seen was refreshed');
   });
 
-  it('GET /records for a hero key asks only for the family\'s rows, the chat and its own hero\'s', () => {
+  it('GET /records for a hero key asks only for the family\'s rows, the beasts, the quests, the chat and its own hero\'s', () => {
     const res = handle('$result = $rest->read_records( $req );', { who: kid('h-1') });
     const at = res.log.findIndex((sql) => sql.startsWith('SELECT seq, LENGTH(body) AS size FROM wp_xp_family_records'));
-    assert.ok(res.log[at].includes('hero_id IS NULL OR hero_id = %s OR store IN (%s)'), res.log[at]);
-    assert.deepStrictEqual(res.args[at], ['fam-1', 0, 'h-1', '__chat', 100]);
+    assert.ok(res.log[at].includes('hero_id IS NULL OR hero_id = %s OR store IN (%s, %s, %s)'), res.log[at]);
+    assert.deepStrictEqual(res.args[at], ['fam-1', 0, 'h-1', ...ANY_WRITER_STORES, 100]);
   });
 });
 

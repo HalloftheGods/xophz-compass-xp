@@ -537,17 +537,18 @@ class Xophz_Compass_Xp_Family_Store {
    * tombstone stores an empty one.
    *
    * A hero key ($caller_hero_id) may not touch a row that already belongs to someone else,
-   * live write or tombstone: a row of another hero, or of nobody (a Game Master's chat message,
-   * whose hero_id is NULL), is refused with xp_family_scope and takes no number. A key with no
-   * row yet is free, and a row of its own hero it may rewrite. A parent is never restricted.
-   * Keys are compared without their trailing spaces, as MySQL compares them.
+   * live write or tombstone: a row of another hero, or of nobody (a Game Master's chat message
+   * or quest, whose hero_id is NULL), is refused with xp_family_scope and takes no number. A
+   * key with no row yet is free, and a row of its own hero it may rewrite. A parent is never
+   * restricted. Keys are compared without their trailing spaces, as MySQL compares them.
    *
    * The turn is checked here, under the lock, and the routes rely on it (they do not check it
    * first): a record of a hero-scope store (Record_Rules::STORES), live or removed, from a
    * device that does not hold that hero's turn is refused with xp_family_turn and takes no
-   * number. Family records and chat are never turn-checked. take_turn takes the same lock, so
-   * once a takeover has been granted no batch of the old holder can still land. The heroes whose
-   * records were written get their last seen refreshed before the lock is let go.
+   * number. Family records and the any-writer stores (chat, quests, beasts) are never
+   * turn-checked. take_turn takes the same lock, so once a takeover has been granted no batch
+   * of the old holder can still land. The heroes whose records were written get their last
+   * seen refreshed before the lock is let go.
    *
    * A record that could not be written is in neither list, so the device sends it again.
    *

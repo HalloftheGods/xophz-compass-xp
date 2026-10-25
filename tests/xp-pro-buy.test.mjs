@@ -150,13 +150,14 @@ describe('XP Pro buy: catalog for Gatekeeper', () => {
     assert.deepStrictEqual(res, [false, true]);
   });
 
-  it('hooks the Bazaar resolver and the Gatekeeper plans filter', () => {
+  it('hooks the Bazaar resolver, the Gatekeeper plans filter and the license product registry', () => {
     const res = runPhpJson(`${PRO}
       $pro = new Xophz_Compass_Xp_Pro( 'xophz-compass-xp', '1' );
       echo json_encode( $pro->filter_hooks );`);
     assert.deepStrictEqual(res, {
       xophz_resolve_buy_request: ['resolve_buy_request', 10, 3],
       gatekeeper_xp_pro_plans: ['provide_plans', 10, 1],
+      gatekeeper_license_products: ['register_product', 10, 1],
     });
   });
 

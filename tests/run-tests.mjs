@@ -15,6 +15,7 @@ import './family-records.test.mjs';
 import './family-turn.test.mjs';
 import './family-pro.test.mjs';
 import './town-hall-membership.test.mjs';
+import './bootstrap-guard.test.mjs';
 
 const results = await harness.run();
 if (results.failed > 0) {

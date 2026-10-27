@@ -60,6 +60,37 @@ register_activation_hook( __FILE__, 'activate_xophz_compass_xp' );
 register_deactivation_hook( __FILE__, 'deactivate_xophz_compass_xp' );
 
 /**
+ * A plugin folder can be incomplete for a moment (a deploy still copying) or for good (a failed
+ * upload). A hard require then takes every site that activates the plugin down, which is what
+ * happened on 2026-10-26. When a bootstrap include is missing: log it, show an admin notice, define
+ * XOPHZ_COMPASS_XP_INCOMPLETE and sit this request out; the next request loads normally once the
+ * files are there.
+ *
+ * @return bool True when both bootstrap includes can be read.
+ */
+function xophz_compass_xp_includes_ready() {
+  $dir = plugin_dir_path( __FILE__ ) . 'includes/';
+  foreach ( array( 'class-xophz-compass-xp.php', 'class-xophz-compass-xp-abilities.php' ) as $file ) {
+    if ( is_readable( $dir . $file ) ) {
+      continue;
+    }
+    define( 'XOPHZ_COMPASS_XP_INCOMPLETE', $dir . $file );
+    error_log( 'xophz-compass-xp: ' . $dir . $file . ' is missing, the plugin folder is incomplete (a deploy still copying, or a failed upload); the plugin is not loaded for this request.' );
+    $notice = function () use ( $file ) {
+      echo '<div class="notice notice-error"><p><strong>Xophz For the XP</strong> is not loaded: <code>includes/' . esc_html( $file ) . '</code> is missing from its plugin folder. Wait for the deploy to finish, or reinstall the plugin.</p></div>';
+    };
+    add_action( 'admin_notices', $notice );
+    add_action( 'network_admin_notices', $notice );
+    return false;
+  }
+  return true;
+}
+
+if ( ! xophz_compass_xp_includes_ready() ) {
+  return;
+}
+
+/**
  * The core plugin class that is used to define internationalization,
  * admin-specific hooks, and public-facing site hooks.
  */

@@ -147,6 +147,8 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-events.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-records.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/family/class-xophz-compass-xp-family-rest.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/party/class-xophz-compass-xp-party-rules.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/party/class-xophz-compass-xp-party-schema.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-xp-town-hall.php';
 
     /**
@@ -201,6 +203,7 @@ class Xophz_Compass_Xp extends Xophz_Compass_Plugin_Base {
     $this->define_class_hooks( 'Xophz_Compass_Xp_Pro' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Family_Schema' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Family_Rest' );
+    $this->define_class_hooks( 'Xophz_Compass_Xp_Party_Schema' );
     $this->define_class_hooks( 'Xophz_Compass_Xp_Town_Hall' );
   } 
 

@@ -12,6 +12,8 @@ import './family-schema.test.mjs';
 import './family-records.test.mjs';
 import './family-turn.test.mjs';
 import './family-pro.test.mjs';
+import './party-rules.test.mjs';
+import './party-schema.test.mjs';
 import './town-hall-membership.test.mjs';
 
 const results = await harness.run();

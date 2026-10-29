@@ -21,8 +21,11 @@ class Xophz_Compass_Xp_Party_Rest {
   const EVENT_LIMIT     = 100;
   const EVENT_LIMIT_MAX = 200;
 
-  /** The most damage one strike may claim: a chore of the biggest Fibonacci size, thirteen steps of ten. */
-  const MAX_STRIKE_DAMAGE = 130;
+  /**
+   * The most damage one strike may claim: a chore of the biggest Fibonacci size (thirteen steps of ten) with the biggest
+   * synergy buff the app gives (x1.2, three heroes or more finishing chores the same day). The daily cap trims it anyway.
+   */
+  const MAX_STRIKE_DAMAGE = 156;
 
   /** A strike older than this is stale: the longest window, plus a day. */
   const STRIKE_MAX_AGE = 15 * 86400;
@@ -354,7 +357,7 @@ class Xophz_Compass_Xp_Party_Rest {
 
   // --- leaving, the code and blocking ----------------------------------------------------------
 
-  /** DELETE /parties/{id}/members/{family_id}/{hero_id}: a hero leaves, or its family takes it out. */
+  /** DELETE /parties/{id}/members/{family_id}/{hero_id}: a hero leaves, its family takes it out, or the party's leader does. */
   public function remove_member( WP_REST_Request $r ) {
     $caller = $this->gate( $r );
     if ( is_wp_error( $caller ) ) {
@@ -365,10 +368,11 @@ class Xophz_Compass_Xp_Party_Rest {
     $family_id = (string) $r->get_param( 'family_id' );
     $hero_id   = (string) $r->get_param( 'hero_id' );
 
-    if ( null === $this->store()->party( $party_id ) ) {
+    $party = $this->store()->party( $party_id );
+    if ( null === $party ) {
       return self::error( 'xp_party_not_found', 'No such party.', 404 );
     }
-    if ( ! self::acts_for( $caller, $family_id, $hero_id ) ) {
+    if ( ! self::acts_for( $caller, $family_id, $hero_id ) && ! self::leader_side( $caller, $party ) ) {
       return self::forbidden();
     }
 

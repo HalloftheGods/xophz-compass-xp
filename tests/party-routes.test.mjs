@@ -240,12 +240,21 @@ describe('Party routes: leaving and the leader', () => {
     assert.deepStrictEqual(res, [{ left: true, disbanded: false }, 1]);
   });
 
-  it('does not let the leader, another family or another hero remove a member', () => {
+  it('does not let another family or another hero remove a member', () => {
     const res = runRoutes(`
       [ $pid ] = two_party();
       $args = [ 'id' => $pid, 'family_id' => 'f2', 'hero_id' => 'ben' ];
-      echo json_encode( [ pcall( 'remove_member', $args, parent_of( 'f1' ) ), pcall( 'remove_member', $args, parent_of( 'f3' ) ), pcall( 'remove_member', $args, hero_of( 'f2', 'dot' ) ) ] );`);
+      echo json_encode( [ pcall( 'remove_member', $args, parent_of( 'f3' ) ), pcall( 'remove_member', $args, hero_of( 'f2', 'dot' ) ), pcall( 'remove_member', $args, hero_of( 'f3', 'cam' ) ) ] );`);
     assert.deepStrictEqual(res, [failed('xp_party_forbidden', 403), failed('xp_party_forbidden', 403), failed('xp_party_forbidden', 403)]);
+  });
+
+  it('lets the party leader take another family\'s hero out, so an unwanted family can be ejected', () => {
+    const res = runRoutes(`
+      [ $pid ] = two_party();
+      $out = pcall( 'remove_member', [ 'id' => $pid, 'family_id' => 'f2', 'hero_id' => 'ben' ], parent_of( 'f1' ) );
+      $feed = pcall( 'feed', [ 'id' => $pid ], parent_of( 'f1' ) )['data'];
+      echo json_encode( [ $out['data'], count( $feed['party']['members'] ), array_values( array_filter( array_column( $feed['events'], 'kind' ), function ( $k ) { return 'leave' === $k; } ) ) ] );`);
+    assert.deepStrictEqual(res, [{ left: true, disbanded: false }, 1, ['leave']]);
   });
 
   it('answers a hero who is not in the party as not a member', () => {
@@ -485,7 +494,7 @@ describe('Party routes: a strike', () => {
       echo json_encode( [
         pcall( 'strike', [ 'damage' => 'x' ] + $base, parent_of( 'f2' ) ),
         pcall( 'strike', [ 'damage' => 0 ] + $base, parent_of( 'f2' ) ),
-        pcall( 'strike', [ 'damage' => 131 ] + $base, parent_of( 'f2' ) ),
+        pcall( 'strike', [ 'damage' => 157 ] + $base, parent_of( 'f2' ) ),
         pcall( 'strike', [ 'key' => '' ] + $base, parent_of( 'f2' ) ),
         pcall( 'strike', [ 'key' => str_repeat( 'k', 81 ) ] + $base, parent_of( 'f2' ) ),
         pcall( 'strike', [ 'key' => 'has space' ] + $base, parent_of( 'f2' ) ),
@@ -493,6 +502,16 @@ describe('Party routes: a strike', () => {
         pcall( 'strike', [ 'day' => 'whenever' ] + $base, parent_of( 'f2' ) ),
       ] );`);
     for (const outcome of res) assert.deepStrictEqual(outcome, failed('xp_party_strike_invalid', 400));
+  });
+
+  it('takes the biggest chore with a full synergy buff (130 x 1.2 = 156), trimmed to the daily cap, and no more than that', () => {
+    const res = runRoutes(`${RAID}
+      $day = gmdate( 'Y-m-d', $GLOBALS['now'] );
+      $base = [ 'id' => $raid, 'key' => 'k1', 'hero_id' => 'ben', 'day' => $day, 'at' => iso( $GLOBALS['now'] ) ];
+      $big = pcall( 'strike', [ 'damage' => 156 ] + $base, parent_of( 'f2' ) );
+      $over = pcall( 'strike', [ 'key' => 'k2', 'damage' => 157 ] + $base, parent_of( 'f2' ) );
+      echo json_encode( [ $big['data']['accepted'], $big['data']['damage'], $over ] );`);
+    assert.deepStrictEqual(res, [true, 60, failed('xp_party_strike_invalid', 400)]);
   });
 
   it('pulls a strike from the future back to now, and turns away a stale one', () => {

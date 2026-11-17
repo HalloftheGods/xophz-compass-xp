@@ -19,8 +19,8 @@
  * Plugin URI:        https://forthexp.com
  * Description:       Reward your visitor's loyalty by gamifying their actions and milestones with points, badges, and levels.
  * Version:           26.10.22-987
- * Author:            Hall of the Gods, Inc. 
- * Author URI:        http://www.midknightknerd.com/xp
+ * Author:            My Compass Consulting 
+ * Author URI:        https://mycompassconsulting.com/
  * License:           GPL-2.0+
  * License URI:       http://www.gnu.org/licenses/gpl-2.0.txt
  * Text Domain:       xophz-compass-xp

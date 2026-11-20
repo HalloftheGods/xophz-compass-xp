@@ -1,10 +1,12 @@
 /**
  * The Pro gate of family sync (MP3, family sync): Family_Pro::entitled asks the Gatekeeper
- * plugin's XP Pro licence store whether a family is entitled, lets the xp_family_pro_entitled
- * filter have the last word, and caches the answer for the request. A rehearsal override
- * (the option xp_family_pro_override) counts only while WP_DEBUG is on. The tests send bare PHP
- * scripts (no harness stubs) because they need to define apply_filters() and get_option()
- * themselves; Gatekeeper is a small stand-in that follows the real class's rule.
+ * plugin's license engine whether a family is entitled (gatekeeper_license_entitled for the
+ * xp-pro product; the Gatekeeper_Xp_Pro_Licenses facade of an older Gatekeeper when the function
+ * is missing), lets the xp_family_pro_entitled filter have the last word, and caches the answer
+ * for the request. A rehearsal override (the option xp_family_pro_override) counts only while
+ * WP_DEBUG is on. The tests send bare PHP scripts (no harness stubs) because they need to define
+ * apply_filters() and get_option() themselves; Gatekeeper is a small stand-in that follows the
+ * real rule.
  */
 
 import fs from 'node:fs';
@@ -60,6 +62,31 @@ export function gatekeeper(records) {
   `;
 }
 
+/**
+ * A stand-in for the engine's gatekeeper_license_entitled( product, account, now ): `records` maps
+ * a product id to its accounts (family id to record), judged by the same rule as the facade.
+ * $GLOBALS['fn_calls'] logs [ product, account, now ] for every question asked.
+ */
+export function gatekeeperFunction(records) {
+  return `
+    $GLOBALS['fn_records'] = ${lit(records)};
+    $GLOBALS['fn_calls']   = [];
+    function gatekeeper_license_entitled( string $product, string $account, ?int $now = null ): bool {
+      $GLOBALS['fn_calls'][] = [ $product, $account, $now ];
+      $record = $GLOBALS['fn_records'][ $product ][ $account ] ?? null;
+      if ( ! is_array( $record ) || ( $record['status'] ?? '' ) !== 'active' ) {
+        return false;
+      }
+      $expires = $record['expires_at'] ?? null;
+      if ( null === $expires ) {
+        return true;
+      }
+      $ts = is_string( $expires ) ? strtotime( $expires ) : false;
+      return false !== $ts && ( $now ?? time() ) < $ts + 259200;
+    }
+  `;
+}
+
 /** Run PHP in the u-wordpress container with nothing preloaded and parse its JSON output. */
 function runBarePhpJson(code) {
   const res = spawnSync('docker', ['exec', '-i', 'u-wordpress', 'php'], {
@@ -89,18 +116,22 @@ const WORDPRESS = `
 `;
 
 /**
- * Run `body` against the class and the stubs. `records` is the Gatekeeper stand-in's table, or
- * null for a site without the Gatekeeper plugin; `debug` is WP_DEBUG (undefined when null).
+ * Run `body` against the class and the stubs. `records` is the facade stand-in's table (the class
+ * Gatekeeper_Xp_Pro_Licenses of an older Gatekeeper), or null for a site without it; `fn` is the
+ * engine function stand-in's table (product id to accounts to records), or null for a Gatekeeper
+ * without the function; `debug` is WP_DEBUG (undefined when null).
  */
-function run(body, { records = null, debug = null } = {}) {
+function run(body, { records = null, debug = null, fn = null } = {}) {
   const wpDebug = debug === null ? '' : `define( 'WP_DEBUG', ${debug ? 'true' : 'false'} );`;
-  return runBarePhpJson(`${WORDPRESS} ${wpDebug} ${records === null ? '' : gatekeeper(records)} ${PRO} ${body}`);
+  const facade = records === null ? '' : gatekeeper(records);
+  const engine = fn === null ? '' : gatekeeperFunction(fn);
+  return runBarePhpJson(`${WORDPRESS} ${wpDebug} ${facade} ${engine} ${PRO} ${body}`);
 }
 
 const ACTIVE = { status: 'active', expires_at: null, plan: 'lifetime' };
 const ended = (secondsAgo, status = 'active') => ({ status, expires_at: when(NOW - secondsAgo), plan: 'monthly' });
 
-describe('Family Pro: the Gatekeeper licence', () => {
+describe('Family Pro: the Gatekeeper licence (the facade class of an older Gatekeeper)', () => {
   it('is false without Gatekeeper, true with an active record, false past grace', () => {
     const without = run(`echo json_encode( ${CLS}::entitled( 'fam-1', ${NOW} ) );`);
     assert.strictEqual(without, false, 'no Gatekeeper plugin means a free family');
@@ -152,6 +183,103 @@ describe('Family Pro: the Gatekeeper licence', () => {
       $b = ${CLS}::entitled( 'fam-2', ${NOW} );
       echo json_encode( [ is_bool( $a ), is_bool( $b ) ] );`, { records: { 'fam-1': ACTIVE } });
     assert.deepStrictEqual(res, [true, true]);
+  });
+});
+
+describe('Family Pro: the license engine function', () => {
+  const FNREC = (records) => ({ 'xp-pro': records });
+
+  it('asks gatekeeper_license_entitled for the xp-pro product with the family and the time', () => {
+    const res = run(`
+      ${CLS}::entitled( 'fam-paid', ${NOW} );
+      ${CLS}::reset();
+      ${CLS}::entitled( 'fam-none', ${NOW + 5} );
+      echo json_encode( $GLOBALS['fn_calls'] );`, { fn: FNREC({ 'fam-paid': ACTIVE }) });
+    assert.deepStrictEqual(res, [['xp-pro', 'fam-paid', NOW], ['xp-pro', 'fam-none', NOW + 5]]);
+  });
+
+  it('is false without a record, true with an active one, false past the grace', () => {
+    const records = FNREC({
+      'fam-life': ACTIVE,
+      'fam-paid': { status: 'active', expires_at: when(NOW + 20 * DAY), plan: 'monthly' },
+      'fam-grace': ended(2 * DAY),
+      'fam-lapsed': ended(4 * DAY),
+      'fam-revoked': { status: 'revoked', expires_at: null, plan: 'yearly' },
+    });
+    const res = run(`
+      $out = [];
+      foreach ( [ 'fam-life', 'fam-paid', 'fam-grace', 'fam-lapsed', 'fam-revoked', 'fam-none' ] as $id ) {
+        ${CLS}::reset();
+        $out[ $id ] = ${CLS}::entitled( $id, ${NOW} );
+      }
+      echo json_encode( $out );`, { fn: records });
+    assert.deepStrictEqual(res, {
+      'fam-life': true,
+      'fam-paid': true,
+      'fam-grace': true,
+      'fam-lapsed': false,
+      'fam-revoked': false,
+      'fam-none': false,
+    });
+  });
+
+  it('judges the family at the time it is given', () => {
+    const res = run(`
+      $out = [];
+      foreach ( [ ${NOW}, ${NOW + 3 * DAY}, ${NOW + 4 * DAY - 1}, ${NOW + 4 * DAY} ] as $at ) {
+        ${CLS}::reset();
+        $out[] = ${CLS}::entitled( 'fam-1', $at );
+      }
+      echo json_encode( $out );`, { fn: FNREC({ 'fam-1': { status: 'active', expires_at: when(NOW + DAY), plan: 'monthly' } }) });
+    assert.deepStrictEqual(res, [true, true, true, false]);
+  });
+
+  it('answers a real bool', () => {
+    const res = run(`
+      $a = ${CLS}::entitled( 'fam-1', ${NOW} );
+      ${CLS}::reset();
+      $b = ${CLS}::entitled( 'fam-2', ${NOW} );
+      echo json_encode( [ is_bool( $a ), is_bool( $b ) ] );`, { fn: FNREC({ 'fam-1': ACTIVE }) });
+    assert.deepStrictEqual(res, [true, true]);
+  });
+
+  it('wins over the Gatekeeper_Xp_Pro_Licenses facade when both exist, and the facade is never asked', () => {
+    const res = run(`
+      $out = [];
+      foreach ( [ 'fam-fn-only', 'fam-class-only' ] as $id ) {
+        ${CLS}::reset();
+        $out[ $id ] = ${CLS}::entitled( $id, ${NOW} );
+      }
+      echo json_encode( [ $out, Gatekeeper_Xp_Pro_Licenses::$gets ] );`, {
+      fn: FNREC({ 'fam-fn-only': ACTIVE }),
+      records: { 'fam-class-only': ACTIVE },
+    });
+    assert.deepStrictEqual(res, [{ 'fam-fn-only': true, 'fam-class-only': false }, 0]);
+  });
+
+  it('falls back to the facade class when the function is missing, and to a free family when both are', () => {
+    const res = run(`
+      echo json_encode( [ function_exists( 'gatekeeper_license_entitled' ), ${CLS}::entitled( 'fam-1', ${NOW} ), Gatekeeper_Xp_Pro_Licenses::$gets ] );`, { records: { 'fam-1': ACTIVE } });
+    assert.deepStrictEqual(res, [false, true, 1]);
+    const none = run(`echo json_encode( ${CLS}::entitled( 'fam-1', ${NOW} ) );`);
+    assert.strictEqual(none, false);
+  });
+
+  it('asks the engine once per family for the request, and the filter still has the last word', () => {
+    const res = run(`
+      $calls = 0;
+      add_filter( 'xp_family_pro_entitled', function ( $default, $family_id ) use ( &$calls ) { $calls++; return 'fam-on' === $family_id ? true : ( 'fam-life' === $family_id ? false : $default ); } );
+      $first = [ ${CLS}::entitled( 'fam-life', ${NOW} ), ${CLS}::entitled( 'fam-life', ${NOW} ), ${CLS}::entitled( 'fam-on', ${NOW} ), ${CLS}::entitled( 'fam-on', ${NOW} ) ];
+      echo json_encode( [ $first, count( $GLOBALS['fn_calls'] ), $calls ] );`, { fn: FNREC({ 'fam-life': ACTIVE }) });
+    // fam-life has a license and the filter forces it off; fam-on has none and the filter forces it on.
+    assert.deepStrictEqual(res, [[false, false, true, true], 2, 2]);
+  });
+
+  it('the rehearsal override needs no engine at all, and does not ask it', () => {
+    const res = run(`
+      $GLOBALS['options'] = [ 'xp_family_pro_override' => '1' ];
+      echo json_encode( [ ${CLS}::entitled( 'fam-1', ${NOW} ), count( $GLOBALS['fn_calls'] ) ] );`, { debug: true, fn: FNREC({}) });
+    assert.deepStrictEqual(res, [true, 0]);
   });
 });
 
